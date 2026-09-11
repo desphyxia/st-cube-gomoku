@@ -552,8 +552,11 @@ export class CubeView {
       this.winMaterial.opacity = 0.55 + 0.45 * pulse;
       const base1 = this.theme.tiles.p1.emissiveIntensity ?? 0;
       const base2 = this.theme.tiles.p2.emissiveIntensity ?? 0;
-      this.materials.win1.emissiveIntensity = base1 + 0.4 + pulse * 1.6;
-      this.materials.win2.emissiveIntensity = base2 + 0.4 + pulse * 1.6;
+      // The gold outline and the polyline are what mark the winning run, so
+      // the stones only need a light shimmer. Boosted harder they blow out to
+      // white and lose the colour that says whose line it is.
+      this.materials.win1.emissiveIntensity = base1 + pulse * 0.22;
+      this.materials.win2.emissiveIntensity = base2 + pulse * 0.22;
     }
     if (this.marker.visible) {
       this.markerMaterial.opacity = 0.55 + 0.45 * Math.sin(now * 2.6);
