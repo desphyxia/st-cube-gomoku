@@ -80,57 +80,97 @@ to try the game.
 
 ## The computer opponent
 
-Every candidate cell is judged by sliding a five-window along each of the four
-line axes through it and counting the windows still *live* — free of opponent
-stones, and free of the walls where a diagonal dies at a cube corner. A window
-holding four of my stones is one move from a win; holding two it is a distant
-promise. Counting live windows rather than matching literal patterns means
-gapped shapes (`oo.oo`) and lines that roll over a face edge need no special
-case. Each cell is scored for the opponent too, since a cell that is valuable
-to them is worth denying. Search is confined to cells within a step or two of
-an existing stone.
+Three layers, deliberately separated, because the first version mixed them and
+the difficulty ordering kept inverting whenever a mode was added.
 
-What separates the levels is how much of that signal each is allowed to act on.
+**Tactics** are forced play — take a win, stop theirs, refuse a twist that hands
+the game away. Correct by construction. Never learned, never tuned.
 
-| | |
+**Position** is everything else. A five-window slides along each of the four
+line axes through a cell and the windows still *live* are counted — free of
+opponent stones and of the walls where a diagonal dies at a cube corner.
+Counting live windows rather than matching literal patterns handles gapped
+shapes and lines that roll over a face edge without a special case. The weights
+that turn those counts into a score are **fitted by self-play**, not chosen by
+hand; they live in `src/js/weights.js` as data.
+
+**Handicap** is how difficulty works: one policy, degraded. Hard plays it
+straight; Medium drops the search and picks loosely among near-best moves;
+Easy also misses roughly half of your winning moves, wanders, and looks one
+step less far. Ordering is structural, so adding a fourth mode cannot invert
+it the way adding the third did.
+
+### Fitting the weights
+
+```sh
+npm run train       # cross-entropy self-play, rewrites src/js/weights.js
+npm run evaluate    # learned vs baseline, the ladder, and search depth
+```
+
+`tools/train.mjs` samples a population of weight sets around a running mean,
+plays each against the incumbent over a *shared* set of seeds so candidates are
+compared on the same games rather than on luck, keeps the best handful and
+moves the mean toward them. Ratio-scale parameters are sampled in log space.
+Nothing is adopted on faith: the fitted weights must beat the hand-tuned
+baseline in a held-out match or the baseline is kept.
+
+What it found, over 40-game matches on a 5-cube, Hard against Hard:
+
+| | fitted vs hand-tuned |
 |---|---|
-| **Easy** | Always takes a win, but notices your winning move only about half the time, and wanders off the best line roughly a third of the time. |
-| **Medium** | Always takes a win, always blocks yours, and will not let a double-four stand. Picks loosely among its near-best moves so it does not play the same game twice. |
-| **Hard** | Adds forks — two threats at once cannot both be answered — and plays out its leading moves to see what your best reply would be worth, discounting anything that hands back more than it creates. |
+| Classic | **59%** — adopted |
+| Encirclement | **80%** — adopted |
+| Torque | 45% — **rejected**, baseline kept |
 
-In Torque it also hunts for a twist that finishes its own line, and spends one
-defensively when the opponent holds a twist that wins on the spot — the one
-threat no stone can block. In Encirclement it values sweeping and being swept.
-Hard's fork chain is tuned for Classic, where it wins 9-0 against Medium; in
-the other two modes that same chain measured *worse* than simply taking the
-best-valued move, so there it keeps Medium's selection and layers its extra
-checks on top. Measured 12 games a pairing on a 5-cube:
+Two results worth more than the win rates. The `fence` term — a hand-written
+guess at "this cell builds toward an enclosure" — trained to essentially zero
+in all three modes, independently rejecting a term I had already rejected by
+hand. And `sweep` trained to zero in Classic and Torque, where no sweep exists:
+the optimiser recovered the structure of the game rather than fitting noise.
 
-| | hard v easy | medium v easy | hard v medium |
+### Searching
+
+Hard's original "subtract what the best reply is worth" penalty measured
+*worse than no search at all* — 57/23/15% against a fixed Medium with it on,
+against 61/45/68% with it off. It made Hard answer the opponent's plans instead
+of having one. It was replaced by negamax with alpha-beta over the learned
+evaluation, and the depth for each mode was measured rather than assumed:
+
+| | d0 | d1 | d2 | d3 | ships |
+|---|---|---|---|---|---|
+| Classic | **58%** | 15% | 40% | 30% | depth 0 |
+| Torque | 47% | 40% | 43% | **73%** | depth 3 |
+| Encirclement | 67% | 77% | 60% | **100%** | depth 3 |
+
+Classic wants no search at all; the two new modes want three ply. Odd shallow
+depths are consistently bad, which is the usual even-odd artefact of stopping a
+search on the opponent's move. A move costs under 1 ms in Classic, 12 ms in
+Torque and 20 ms in Encirclement, with a 68 ms worst case.
+
+### The resulting ladder
+
+40 games a pairing, size 5 (`d` = drawn):
+
+| | hard v medium | medium v easy | hard v easy |
 |---|---|---|---|
-| Classic | 12-0 | 12-0 | 9-0 |
-| Torque | 12-0 | 12-0 | 7-5 |
-| Encirclement | 12-0 | 12-0 | 9-3 |
+| Classic | 17-8 /15d | 27-3 /10d | 32-2 /6d |
+| Torque | 34-6 | 21-19 | 37-3 |
+| Encirclement | 39-0 /1d | 28-12 | 36-4 |
+
+Torque's medium-versus-easy is thin at 21-19, and honestly so: it is a
+high-variance mode where random play is competitive, and disabling Medium's
+twists did not move it. The top of the ladder is solid in all three.
 
 Across 200 Torque games the computer never once twisted the opponent into a
 win, which is a test rather than a hope.
 
-Measured over 20 games a side on a 5-cube: hard beat easy 20–0, medium beat
-easy 20–0, and hard beat medium 17–2. A move costs under 2 ms at medium and
-around 25 ms at hard, so it runs on the main thread; the pause before it plays
-is deliberate, not the search.
+### Speed
 
-## Themes
-
-Switchable mid-game from the bar in the bottom right. Each one owns its
-clear colour, materials, light rig, bloom settings, ambient particles and the
-HUD palette.
-
-| | |
-|---|---|
-| **Neon Circuit** | Cold cyan and magenta on a black starfield, with bloom. |
-| **Sumi-e** | Ink and vermilion stones on ivory tiles, warm paper ground, no glow. |
-| **Magma Forge** | Molten orange against plasma violet on cooled basalt, drifting embers. |
+Self-play needs a lot of games, so the nine cells of every line window are
+precomputed per topology and evaluation became flat array reads. That is 6-10x
+more games per second (Classic at Hard went from 1.6 to 16.3 games/s), and the
+rewritten evaluator was checked against the old one over 20,804 evaluations on
+four board sizes with zero mismatches, so the speed cost nothing in behaviour.
 
 ## How it is put together
 
@@ -144,6 +184,9 @@ src/js/game.js       Rules: legality, turn order, win detection. Pure logic.
 src/js/view.js       three.js scene, tiles, picking, camera work.
 src/js/themes.js     The three themes.
 src/js/modes.js      The three game modes and the random roll.
+src/js/weights.js    Fitted positional weights, per mode. Data, not code.
+tools/train.mjs      Self-play fitting of those weights.
+tools/evaluate.mjs   Measures strength, the ladder, and search depth.
 src/js/ai.js         The computer opponent: threat scoring and the three
                      difficulty ladders.
 src/js/net.js        Wire protocol and the renderer half of the bridge.

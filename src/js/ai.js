@@ -1,31 +1,30 @@
 /**
- * Threat-based computer opponent.
+ * The computer opponent.
  *
- * Every candidate cell is judged by sliding a five-window along each of the
- * four line axes through it and counting the windows that are still *live* —
- * free of opponent stones and of the walls where a diagonal dies at a cube
- * corner. A window holding four of my stones is one move from a win; holding
- * two of them it is a distant promise. Counting live windows rather than
- * matching literal patterns means gapped shapes (`oo.oo`) and lines that roll
- * over a face edge are handled without a special case.
+ * Three layers, deliberately separated:
  *
- * The same cell is then scored for the opponent, because a cell that is
- * valuable to them is worth denying. What separates the difficulties is how
- * much of that signal each one is allowed to act on.
+ *   Tactics    forced play - take a win, stop theirs, refuse a twist that
+ *              hands the game away. Correct by construction, never learned,
+ *              never tuned.
+ *   Position   everything else, scored by the weights in weights.js. Those
+ *              are fitted by self-play rather than picked by hand.
+ *   Handicap   difficulty is one policy degraded, not three policies. Hard is
+ *              the strong play; Medium loses the reply search and plays
+ *              loosely; Easy also misses blocks and wanders. Ordering is
+ *              structural, so adding a mode cannot invert it.
+ *
+ * Scoring slides a five-window along each of the four line axes through a cell
+ * and counts the windows still *live* - free of opponent stones and of the
+ * walls where a diagonal dies at a cube corner. Counting live windows rather
+ * than matching literal patterns handles gapped shapes and lines that roll
+ * over a face edge without a special case.
  */
 import { EMPTY, P1, P2, WIN_LENGTH, other } from './game.js';
-import { neg } from './cube.js';
+import { weightsFor, SEARCH } from './weights.js';
 
-const WALL = -1;
 const REACH = WIN_LENGTH - 1;
 const SPAN = REACH * 2 + 1;
-
-/** Worth of a live five-window already holding k of my stones. */
-const WEIGHT = [0, 2, 26, 340, 7000, 1000000];
-
-/** Worth of sweeping one enemy stone off the board, in Encirclement. */
-const SWEEP = 1500;
-
+const WIN_SCORE = 1e6;
 
 export const DIFFICULTIES = [
   { id: 'easy', name: 'Easy', blurb: 'Sees threats but often looks away.' },
@@ -39,52 +38,17 @@ export function difficultyById(id) {
   return DIFFICULTIES.find((d) => d.id === id) || DIFFICULTIES[1];
 }
 
-// ------------------------------------------------------------------ scoring
-
 /**
- * The run of cells centred on `id` along one axis, `REACH` each way.
- * Cells past a cube corner, and cells a short ring has already visited, read
- * as WALL so no window can count through them.
+ * Difficulty is subtraction. Every level runs the same policy; these say how
+ * much of it each one is allowed to keep.
  */
-function lineWindow(game, id, axis, player) {
-  const topo = game.topo;
-  const cells = new Array(SPAN).fill(WALL);
-  cells[REACH] = player;
-  const origin = topo.lattice(id);
-  const seen = new Set([id]);
+const HANDICAP = {
+  hard: { blockMiss: 0, noise: 0, topK: 1, radius: 2, reply: true, tactics: 'full', twists: true },
+  medium: { blockMiss: 0, noise: 0.06, topK: 4, radius: 2, reply: false, tactics: 'full', twists: true },
+  easy: { blockMiss: 0.45, noise: 0.4, topK: 7, radius: 1, reply: false, tactics: 'basic', twists: false },
+};
 
-  for (const forward of [true, false]) {
-    let p = origin;
-    let d = forward ? axis : neg(axis);
-    for (let i = 1; i <= REACH; i++) {
-      const next = topo.step(p, d);
-      if (!next) break;
-      const nid = topo.fromLattice(next.p);
-      if (seen.has(nid)) break;          // a short ring has closed on itself
-      seen.add(nid);
-      cells[forward ? REACH + i : REACH - i] = game.cells[nid];
-      p = next.p;
-      d = next.d;
-    }
-  }
-  return cells;
-}
-
-/** counts[k] = live five-windows through the centre holding k of my stones. */
-function windowCounts(line, player, opp) {
-  const counts = [0, 0, 0, 0, 0, 0];
-  for (let s = 0; s <= REACH; s++) {
-    let mine = 0;
-    let live = true;
-    for (let i = s; i < s + WIN_LENGTH; i++) {
-      const v = line[i];
-      if (v === opp || v === WALL) { live = false; break; }
-      if (v === player) mine++;
-    }
-    if (live) counts[mine]++;
-  }
-  return counts;
-}
+// ------------------------------------------------------------------ scoring
 
 /**
  * What placing `player` on `id` would be worth.
@@ -93,27 +57,74 @@ function windowCounts(line, player, opp) {
  *            blocked, so that is a won position
  *   threes - axes carrying a three with room to grow both ways
  */
-export function evaluateCell(game, id, player) {
+export function evaluateCell(game, id, player, weights = weightsFor(game.mode)) {
   const opp = other(player);
-  const { f } = game.topo.decode(id);
+  const windows = game.topo.lineWindows;
+  const cells = game.cells;
+  const w = [0, weights.w1, weights.w2, weights.w3, weights.w4, WIN_SCORE];
+
   let score = 0;
   let win = false;
   let fours = 0;
   let threes = 0;
 
-  for (const axis of game.topo.lineDirections(f)) {
-    const counts = windowCounts(lineWindow(game, id, axis, player), player, opp);
-    for (let k = 1; k <= WIN_LENGTH; k++) score += counts[k] * WEIGHT[k];
-    if (counts[WIN_LENGTH] > 0) win = true;
-    fours += counts[4];
-    if (counts[3] >= 2) threes++;
+  for (let a = 0; a < 4; a++) {
+    const base = (id * 4 + a) * SPAN;
+    let three = 0;
+    for (let s = 0; s <= REACH; s++) {
+      let mine = 1;                       // the cell itself, once placed
+      let live = true;
+      for (let i = s; i < s + WIN_LENGTH; i++) {
+        if (i === REACH) continue;        // centre, already counted
+        const cell = windows[base + i];
+        if (cell < 0) { live = false; break; }
+        const v = cells[cell];
+        if (v === opp) { live = false; break; }
+        if (v === player) mine++;
+      }
+      if (!live) continue;
+      score += w[mine];
+      if (mine === WIN_LENGTH) win = true;
+      else if (mine === 4) fours++;
+      else if (mine === 3) three++;
+    }
+    if (three >= 2) threes++;
   }
   return { score, win, fours, threes };
 }
 
+/**
+ * To close a loop a stone has to join two parts of the fence, so it needs at
+ * least two friendly neighbours. Cheap way to skip the region scan on almost
+ * every candidate.
+ */
+function couldClose(game, id, player) {
+  const nbrs = game.topo.neighbours;
+  let friends = 0;
+  for (let k = 0; k < 8; k++) {
+    const nb = nbrs[id * 8 + k];
+    if (nb >= 0 && game.cells[nb] === player && ++friends >= 2) return true;
+  }
+  return false;
+}
+
+/** How much a cell builds toward a fence: our stones meeting theirs. */
+function fenceValue(game, id, player, opp) {
+  const nbrs = game.topo.neighbours;
+  let contact = 0;
+  let support = 0;
+  for (let k = 0; k < 8; k++) {
+    const nb = nbrs[id * 8 + k];
+    if (nb < 0) continue;
+    if (game.cells[nb] === opp) contact++;
+    else if (game.cells[nb] === player) support++;
+  }
+  return contact * support;
+}
+
 // --------------------------------------------------------------- candidates
 
-/** Empty cells within `radius` steps of a stone — where play actually is. */
+/** Empty cells within `radius` steps of a stone - where play actually is. */
 function candidates(game, radius) {
   const nbrs = game.topo.neighbours;
   const out = new Set();
@@ -157,23 +168,8 @@ function openingMove(game, rng) {
   return game.topo.id(face, Math.min(n - 1, Math.max(0, r)), Math.min(n - 1, Math.max(0, c)));
 }
 
-/**
- * To close a loop a stone has to join two parts of the fence, so it needs at
- * least two friendly neighbours. Cheap way to skip the region scan on almost
- * every candidate.
- */
-function couldClose(game, id, player) {
-  const nbrs = game.topo.neighbours;
-  let friends = 0;
-  for (let k = 0; k < 8; k++) {
-    const nb = nbrs[id * 8 + k];
-    if (nb >= 0 && game.cells[nb] === player && ++friends >= 2) return true;
-  }
-  return false;
-}
-
 /** Every candidate scored for both sides, best first. */
-function rank(game, player, defence, radius) {
+function rank(game, player, radius, W) {
   const opp = other(player);
   const cells = candidates(game, radius);
   if (!cells) return null;
@@ -181,26 +177,23 @@ function rank(game, player, defence, radius) {
   const enemyStones = sweeping ? game.stoneCount(opp) : 0;
 
   const ranked = cells.map((id) => {
-    const mine = evaluateCell(game, id, player);
-    const theirs = evaluateCell(game, id, opp);
-    let value = mine.score + defence * theirs.score;
+    const mine = evaluateCell(game, id, player, W);
+    const theirs = evaluateCell(game, id, opp, W);
+    let value = mine.score + W.defence * theirs.score;
     let sweeps = 0;
     let sweepWin = false;
     if (sweeping) {
       if (couldClose(game, id, player)) {
         sweeps = game.wouldSweep(id, player).length;
-        value += sweeps * SWEEP;
-        // Taking the last enemy stone off the cube ends it. Flagged rather
-        // than scored, so one rare possibility cannot swamp every comparison.
+        value += sweeps * W.sweep;
         sweepWin = enemyStones > 0 && sweeps >= enemyStones;
       }
-      // A cell that would close *their* loop is worth taking away. Without
-      // this the opponent only ever builds fences, never fears one.
-      if (couldClose(game, id, opp)) {
-        value += defence * game.wouldSweep(id, opp).length * SWEEP;
+      if (W.deny > 0 && couldClose(game, id, opp)) {
+        value += W.deny * W.defence * game.wouldSweep(id, opp).length * W.sweep;
       }
+      if (W.fence > 0) value += fenceValue(game, id, player, opp) * W.fence;
     }
-    return { id, mine, theirs, sweeps, sweepWin, value };
+    return { id, mine, theirs, sweeps, sweepWin, value, own: mine.score + sweeps * W.sweep };
   });
   ranked.sort((a, b) => b.value - a.value);
   return ranked;
@@ -226,10 +219,7 @@ function withCells(game, cells, fn) {
   }
 }
 
-/**
- * Twists worth thinking about: only layers that actually hold stones, since
- * rotating bare tiles changes nothing.
- */
+/** Twists worth thinking about: only layers that actually hold stones. */
 function twistOptions(game) {
   const out = [];
   for (let axis = 0; axis < 3; axis++) {
@@ -243,16 +233,6 @@ function twistOptions(game) {
   return out;
 }
 
-/** Could `player` win outright with a twist right now? */
-function twistWinAvailable(game, player) {
-  if (!game.canTwist(player) && game.twists[player] <= 0) return false;
-  for (const move of twistOptions(game)) {
-    const outcome = twistOutcome(game, player, move);
-    if (outcome.mine && !outcome.theirs) return true;
-  }
-  return false;
-}
-
 /** Who would be holding five after this twist. */
 function twistOutcome(game, player, move) {
   const cells = twistedCells(game, move);
@@ -263,42 +243,22 @@ function twistOutcome(game, player, move) {
   return { ...lines, cells };
 }
 
-// ------------------------------------------------------------------- choice
-
-const pickFrom = (list, rng) => list[Math.floor(rng() * list.length)].id;
-const place = (id) => ({ t: 'place', id });
-
-/**
- * Hard only: play out each of the leading moves and see what the best reply
- * is worth, so a move that hands back a bigger threat than it creates is
- * discounted. `game.cells` is mutated and restored in place.
- */
-function lookahead(game, player, ranked, width, rng) {
-  const opp = other(player);
-  let best = null;
-  for (const move of ranked.slice(0, width)) {
-    game.cells[move.id] = player;
-    const replies = rank(game, opp, 0.9, 2);
-    game.cells[move.id] = EMPTY;
-    const reply = replies && replies.length ? replies[0] : null;
-    // A reply that wins outright makes this move unplayable unless forced.
-    // Everything else is capped: an uncapped penalty turns the search
-    // paranoid, answering the opponent's plans instead of having one.
-    const penalty = !reply ? 0
-      : (reply.mine.win || reply.sweepWin) ? 5000000
-        : Math.min(reply.value, 40000) * 0.9;
-    const value = move.value - penalty + rng() * 8;
-    if (!best || value > best.value) best = { id: move.id, value };
+/** Could `player` win outright with a twist right now? */
+function twistWinAvailable(game, player) {
+  if (game.twists[player] <= 0) return false;
+  for (const move of twistOptions(game)) {
+    const outcome = twistOutcome(game, player, move);
+    if (outcome.mine && !outcome.theirs) return true;
   }
-  return place(best ? best.id : ranked[0].id);
+  return false;
 }
 
 /**
  * What to do with a twist, if anything. Twists are scarce and a careless one
  * loses on the spot, so the bar is high: finish our own line, or break up a
- * threat that no single stone can answer.
+ * threat no stone can answer.
  */
-function twistPlan(game, player, ranked, level, rng) {
+function twistPlan(game, player, ranked, W, rng) {
   const opp = other(player);
   const options = twistOptions(game);
   if (!options.length) return null;
@@ -306,110 +266,130 @@ function twistPlan(game, player, ranked, level, rng) {
   const safe = [];
   for (const move of options) {
     const outcome = twistOutcome(game, player, move);
-    // Finishing our five wins immediately - unless it finishes theirs too,
-    // which by the rules hands them the game.
-    if (outcome.mine && !outcome.theirs && level !== 'easy') return { move, urgency: 'win' };
+    if (outcome.mine && !outcome.theirs) return { move, urgency: 'win' };
     if (!outcome.mine && !outcome.theirs) safe.push({ move, cells: outcome.cells });
   }
   if (!safe.length) return null;
 
   // Two kinds of trouble a stone cannot answer: two separate cells that each
   // complete five, or an opponent holding a twist that wins on the spot.
-  // Against the second there is no block at all - the only reply is to shake
-  // their alignment apart before they use it.
   const theirTwistWin = game.twists[opp] > 0 && twistWinAvailable(game, opp);
   const doomed = theirTwistWin || ranked.filter((m) => m.theirs.win).length >= 2;
-  if (doomed && level !== 'easy') {
-    let best = null;
-    const checked = safe.slice(0, theirTwistWin ? 8 : 14);
-    for (const option of checked) {
-      const { theirs, mine, stillLost } = withCells(game, option.cells, () => ({
-        theirs: rank(game, opp, 0, 2),
-        mine: rank(game, player, 0, 2),
-        // Scrambling is only worth it if their winning twist goes with it.
-        stillLost: theirTwistWin && twistWinAvailable(game, opp),
-      }));
-      // Judge the twist by the position it leaves us, not just by what it
-      // takes from them - a twist wrecks our own shape as readily as theirs.
-      const value = (mine && mine.length ? mine[0].value : 0)
-        - (theirs && theirs.length ? theirs[0].value : 0)
-        - (stillLost ? 2000000 : 0);
-      if (!best || value > best.value) best = { move: option.move, value };
-    }
-    if (best) return { move: best.move, urgency: 'escape' };
-  }
+  if (!doomed) return { move: safe[Math.floor(rng() * safe.length)].move, urgency: 'idle' };
 
-  return { move: safe[Math.floor(rng() * safe.length)].move, urgency: 'idle' };
+  let best = null;
+  for (const option of safe.slice(0, theirTwistWin ? 8 : 14)) {
+    const { theirs, mine, stillLost } = withCells(game, option.cells, () => ({
+      theirs: rank(game, opp, 2, W),
+      mine: rank(game, player, 2, W),
+      stillLost: theirTwistWin && twistWinAvailable(game, opp),
+    }));
+    // Judge the twist by the position it leaves us, not only by what it takes
+    // from them - a twist wrecks our own shape as readily as theirs.
+    const value = (mine && mine.length ? mine[0].value : 0)
+      - (theirs && theirs.length ? theirs[0].value : 0)
+      - (stillLost ? 2e6 : 0);
+    if (!best || value > best.value) best = { move: option.move, value };
+  }
+  return best ? { move: best.move, urgency: 'escape' } : null;
+}
+
+// -------------------------------------------------------------------- choice
+
+const place = (id) => ({ t: 'place', id });
+const pick = (list, rng) => place(list[Math.floor(rng() * list.length)].id);
+
+/**
+ * Hard's search. Negamax with alpha-beta over placements, ordered by the
+ * static score so the cut-offs bite early. Stones are written into the board
+ * and taken out again; sweeps are not replayed inside the search, so in
+ * Encirclement the leaf value is an approximation of the position rather than
+ * the position itself.
+ *
+ * This replaces an earlier hand-rolled "subtract the best reply" penalty,
+ * which measured worse than no search at all in all three modes.
+ */
+function negamax(game, player, depth, alpha, beta, W, width) {
+  const ranked = rank(game, player, 2, W);
+  if (!ranked || !ranked.length) return 0;
+  if (ranked[0].mine.win || ranked[0].sweepWin) return WIN_SCORE * (depth + 1);
+  if (depth === 0) {
+    const theirs = rank(game, other(player), 2, W);
+    return ranked[0].own - (theirs && theirs.length ? theirs[0].own : 0);
+  }
+  let best = -Infinity;
+  for (const move of ranked.slice(0, width)) {
+    game.cells[move.id] = player;
+    const value = -negamax(game, other(player), depth - 1, -beta, -alpha, W, width);
+    game.cells[move.id] = EMPTY;
+    if (value > best) best = value;
+    if (value > alpha) alpha = value;
+    if (alpha >= beta) break;
+  }
+  return best;
+}
+
+function searchMove(game, player, ranked, W, depth, width) {
+  const opp = other(player);
+  let best = null;
+  for (const move of ranked.slice(0, width)) {
+    game.cells[move.id] = player;
+    const value = -negamax(game, opp, depth - 1, -Infinity, Infinity, W, width);
+    game.cells[move.id] = EMPTY;
+    if (!best || value > best.value) best = { id: move.id, value };
+  }
+  return place(best ? best.id : ranked[0].id);
 }
 
 /**
  * The move `player` should make, as { t: 'place', id } or
- * { t: 'twist', axis, layer, dir }. `difficulty` is an id from DIFFICULTIES;
- * `rng` is injectable so games can be replayed in tests.
+ * { t: 'twist', axis, layer, dir }. `rng` is injectable so games replay, and
+ * `weights` so the trainer can pit two weight sets against each other.
  */
-export function chooseMove(game, player, difficulty = DEFAULT_DIFFICULTY, rng = Math.random) {
+export function chooseMove(game, player, difficulty = DEFAULT_DIFFICULTY, rng = Math.random, weights) {
   if (game.over) return null;
   const level = difficultyById(difficulty).id;
+  const H = HANDICAP[level];
+  const W = weights || weightsFor(game.mode);
+  const opp = other(player);
 
-  const radius = level === 'easy' ? 1 : 2;
-  const defence = level === 'easy' ? 0.55 : level === 'medium' ? 0.85 : 1;
-  const ranked = rank(game, player, defence, radius);
+  const ranked = rank(game, player, H.radius, W);
   if (!ranked) return place(openingMove(game, rng));
 
-  // 1. Take a win. Nothing outranks it - five in a row, or sweeping their
-  //    last stone off the cube.
+  // --- tactics: forced, never learned ------------------------------------
   const winning = ranked.filter((m) => m.mine.win || m.sweepWin);
-  if (winning.length) return place(pickFrom(winning, rng));
+  if (winning.length) return pick(winning, rng);
 
-  const twist = game.canTwist(player) ? twistPlan(game, player, ranked, level, rng) : null;
+  const canTwist = H.twists && game.canTwist(player);
+  const twist = canTwist ? twistPlan(game, player, ranked, W, rng) : null;
   if (twist && twist.urgency === 'win') return twist.move;
+  if (twist && twist.urgency === 'escape') return twist.move;
 
   if (ranked.length === 1) return place(ranked[0].id);
 
-  // 2. Block theirs, or twist if a block cannot save us.
   const losing = ranked.filter((m) => m.theirs.win || m.theirs.sweepWin);
-  if (twist && twist.urgency === 'escape') return twist.move;
-  if (losing.length && (level !== 'easy' || rng() < 0.55)) return place(pickFrom(losing, rng));
+  if (losing.length && rng() >= H.blockMiss) return pick(losing, rng);
 
-  if (level === 'easy') {
-    // Wander: a third of the time anywhere nearby, otherwise loosely among
-    // the better-looking moves. Occasionally squander a twist.
-    if (twist && rng() < 0.08) return twist.move;
-    if (rng() < 0.32) return place(pickFrom(ranked, rng));
-    return place(pickFrom(ranked.slice(0, Math.min(6, ranked.length)), rng));
+  if (H.tactics === 'full') {
+    const forcing = ranked.filter((m) => m.mine.fours >= 2);
+    if (forcing.length) return pick(forcing, rng);
+    const blocking = ranked.filter((m) => m.theirs.fours >= 2);
+    if (blocking.length) return pick(blocking, rng);
+    const harvest = ranked.filter((m) => m.sweeps >= 2);
+    if (harvest.length) return place(harvest[0].id);
   }
 
-  // 3. Two ways to make five cannot both be blocked - make one, or stop one.
-  const forcing = ranked.filter((m) => m.mine.fours >= 2);
-  if (forcing.length) return place(pickFrom(forcing, rng));
-  const blocking = ranked.filter((m) => m.theirs.fours >= 2);
-  if (blocking.length) return place(pickFrom(blocking, rng));
-
-  // Sweeping stones off the board is concrete and permanent: take a real one
-  // ahead of any question of shape.
-  const harvest = ranked.filter((m) => m.sweeps >= 2);
-  if (harvest.length) return place(harvest[0].id);
-
-  if (level === 'medium' || game.mode !== 'classic') {
-    // Near-best. Medium keeps some slack so it does not play the same game
-    // twice; Hard takes the best of them outright.
-    const cut = ranked[0].value * 0.92;
-    const close = ranked.filter((m) => m.value >= cut);
-    if (level === 'medium') return place(pickFrom(close.slice(0, 4), rng));
-    return place(close[0].id);
+  // --- position: learned --------------------------------------------------
+  if (H.reply && SEARCH[game.mode].depth > 0) {
+    const { depth, width } = SEARCH[game.mode];
+    return searchMove(game, player, ranked, W, depth, width);
   }
 
-  // 4. Hard: forks first, then verify the leaders against the best reply.
-  const forks = ranked.filter((m) => m.mine.threes >= 2 || m.mine.fours >= 1 && m.mine.threes >= 1);
-  if (forks.length && forks[0].value >= ranked[0].value * 0.9) return place(forks[0].id);
-  const counterForks = ranked.filter((m) => m.theirs.threes >= 2);
-  // Answer their fork, but not at any price: in a dense middlegame there is
-  // almost always one to answer, and taken blindly this branch swallows every
-  // move that was worth more.
-  if (counterForks.length && !ranked[0].mine.fours
-      && counterForks[0].value >= ranked[0].value * 0.8) {
-    return place(counterForks[0].id);
-  }
-
-  return lookahead(game, player, ranked, 8, rng);
+  const scored = H.noise > 0
+    ? ranked.map((m) => ({ id: m.id, value: m.value * (1 + H.noise * (rng() * 2 - 1)) }))
+      .sort((a, b) => b.value - a.value)
+    : ranked;
+  const cut = scored[0].value * 0.92;
+  const close = scored.filter((m) => m.value >= cut).slice(0, H.topK);
+  return pick(close.length ? close : scored.slice(0, 1), rng);
 }

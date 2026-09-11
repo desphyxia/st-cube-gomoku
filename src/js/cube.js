@@ -42,6 +42,22 @@ export const MAX_SIZE = 9;
 
 const neg = (d) => [-d[0], -d[1], -d[2]];
 
+/**
+ * Topologies are immutable derived tables, so one per size is shared by every
+ * game. Self-play builds thousands of boards; rebuilding the tables each time
+ * dominated the cost.
+ */
+const topologies = new Map();
+
+export function topologyFor(size) {
+  let topo = topologies.get(size);
+  if (!topo) {
+    topo = new CubeTopology(size);
+    topologies.set(size, topo);
+  }
+  return topo;
+}
+
 export class CubeTopology {
   constructor(size) {
     if (!Number.isInteger(size) || size < MIN_SIZE || size > MAX_SIZE) {
@@ -190,6 +206,49 @@ export class CubeTopology {
       }
     }
     this._orthogonal = table;
+    return table;
+  }
+
+  /**
+   * For every cell and every one of its four line axes, the nine cells of the
+   * window centred on it: index (id * 4 + axis) * 9 + k, k = 0..8, with the
+   * cell itself at k = 4 and -1 where the line dies at a cube corner or a
+   * short ring has closed back on itself.
+   *
+   * This is the opponent's inner loop. Precomputing it turns every evaluation
+   * into flat array reads instead of walking the fold arithmetic each time.
+   */
+  get lineWindows() {
+    if (this._lineWindows) return this._lineWindows;
+    const reach = 4;
+    const span = reach * 2 + 1;
+    const table = new Int32Array(this.cellCount * 4 * span).fill(-1);
+
+    for (let id = 0; id < this.cellCount; id++) {
+      const { f } = this.decode(id);
+      const axes = this.lineDirections(f);
+      const origin = this.lattice(id);
+      for (let a = 0; a < 4; a++) {
+        const base = (id * 4 + a) * span;
+        table[base + reach] = id;
+        const seen = new Set([id]);
+        for (const forward of [true, false]) {
+          let p = origin;
+          let d = forward ? axes[a] : neg(axes[a]);
+          for (let i = 1; i <= reach; i++) {
+            const next = this.step(p, d);
+            if (!next) break;
+            const nid = this.fromLattice(next.p);
+            if (seen.has(nid)) break;
+            seen.add(nid);
+            table[base + (forward ? reach + i : reach - i)] = nid;
+            p = next.p;
+            d = next.d;
+          }
+        }
+      }
+    }
+    this._lineWindows = table;
     return table;
   }
 

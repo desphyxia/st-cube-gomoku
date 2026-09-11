@@ -8,7 +8,9 @@
   "main": "electron/main.cjs",
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "train": "node tools/train.mjs",
+    "evaluate": "node tools/evaluate.mjs"
   },
   "dependencies": {
     "steamworks.js": "^0.4.0",

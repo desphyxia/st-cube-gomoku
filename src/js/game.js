@@ -7,7 +7,7 @@
  * as a fence: on a closed surface a loop cuts the board in two, and the
  * smaller side is inside it.
  */
-import { CubeTopology, neg } from './cube.js';
+import { topologyFor, neg } from './cube.js';
 import { DEFAULT_MODE, modeById } from './modes.js';
 
 export const EMPTY = 0;
@@ -20,7 +20,7 @@ export const other = (player) => (player === P1 ? P2 : P1);
 
 export class Game {
   constructor(size, { first = P1, winLength = WIN_LENGTH, mode = DEFAULT_MODE } = {}) {
-    this.topo = new CubeTopology(size);
+    this.topo = topologyFor(size);
     this.size = size;
     this.mode = modeById(mode).id;
     this.winLength = winLength;
