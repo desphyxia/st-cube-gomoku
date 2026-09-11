@@ -52,6 +52,9 @@ export class CubeView {
     this.pickHandler = null;
     this.composer = null;
     this.flickerLights = [];
+    this.twisting = null;
+    this.flash = null;
+    this.highlight = null;
 
     this.camTween = null;
     this._showcase = false;
@@ -154,6 +157,7 @@ export class CubeView {
       mesh.userData.cellId = id;
       mesh.userData.face = f;
       mesh.userData.normal = nVec.clone();
+      mesh.userData.home = { position: mesh.position.clone(), quaternion: mesh.quaternion.clone() };
       this.boardGroup.add(mesh);
       this.tiles[id] = mesh;
     }
@@ -208,6 +212,54 @@ export class CubeView {
     this.scene.add(this.winRings);
   }
 
+  // ------------------------------------------------------------ twisting
+
+  /**
+   * Animate a layer through its quarter turn. The tiles are reparented to a
+   * pivot and rotated bodily, so the stones visibly travel to the cells they
+   * now occupy; at the end each tile snaps back to its resting transform and
+   * the board is repainted from the new state.
+   */
+  startTwist(move, onDone) {
+    if (!this.game) { if (onDone) onDone(); return; }
+    const ids = this.game.topo.twistLayer(move.axis, move.layer);
+    const pivot = new THREE.Group();
+    this.boardGroup.add(pivot);
+    for (const id of ids) if (this.tiles[id]) pivot.attach(this.tiles[id]);
+
+    const axis = new THREE.Vector3();
+    axis.setComponent(move.axis, 1);
+    this.marker.visible = false;
+    this.winLine.visible = false;
+    this.winRings.clear();
+    this.setHighlight(null);
+    this.twisting = {
+      pivot, ids, axis,
+      angle: (move.dir > 0 ? 1 : -1) * Math.PI / 2,
+      t: 0, duration: 0.55, onDone,
+    };
+  }
+
+  get busy() {
+    return !!this.twisting;
+  }
+
+  /** Light up one twist layer so the player can see what they are about to turn. */
+  setHighlight(layer) {
+    if (!this.game) return;
+    const same = (a, b) => (!a && !b) || (a && b && a.axis === b.axis && a.layer === b.layer);
+    if (same(this.highlight, layer)) return;
+    this.highlight = layer;
+    this.refresh();
+  }
+
+  /** Briefly light the cells a sweep has just cleared. */
+  flashCells(ids) {
+    if (!ids || !ids.length) return;
+    this.flash = { ids: [...ids], start: this.now(), duration: 0.75 };
+    for (const id of ids) this.popCell(id);
+  }
+
   /** Pull every tile's appearance from the current game state. */
   refresh() {
     if (!this.game || !this.materials) return;
@@ -243,6 +295,15 @@ export class CubeView {
     } else {
       this.winLine.visible = false;
       this.winRings.clear();
+    }
+
+    if (this.highlight) {
+      for (const id of this.game.topo.twistLayer(this.highlight.axis, this.highlight.layer)) {
+        if (this.tiles[id] && g.cells[id] === EMPTY) this.tiles[id].material = this.materials.preview;
+      }
+    }
+    if (this.flash) {
+      for (const id of this.flash.ids) if (this.tiles[id]) this.tiles[id].material = this.materials.flash;
     }
 
     if (g.lastMove >= 0 && this.tiles[g.lastMove]) {
@@ -295,6 +356,14 @@ export class CubeView {
       }),
       win1: make(theme.tiles.p1),
       win2: make(theme.tiles.p2),
+      flash: make(theme.tiles.empty, {
+        emissive: new THREE.Color(theme.accent),
+        emissiveIntensity: 1.6,
+      }),
+      preview: make(theme.tiles.empty, {
+        emissive: new THREE.Color(theme.accent),
+        emissiveIntensity: 0.5,
+      }),
     };
 
     this.markerMaterial.color.set(theme.accent);
@@ -438,7 +507,7 @@ export class CubeView {
     });
 
     this.canvas.addEventListener('pointermove', (ev) => {
-      if (!this.interactive) return;
+      if (!this.interactive || this.twisting) return;
       const id = hit(ev);
       this._setHover(id >= 0 && this.pickFilter(id) ? id : -1);
     });
@@ -450,7 +519,7 @@ export class CubeView {
       const dragged = Math.hypot(ev.clientX - downAt.x, ev.clientY - downAt.y) > 6;
       const held = performance.now() - downAt.t > 550;
       downAt = null;
-      if (dragged || held || !this.interactive) return;
+      if (dragged || held || !this.interactive || this.twisting) return;
       const id = hit(ev);
       if (id >= 0 && this.pickFilter(id) && this.pickHandler) this.pickHandler(id);
     });
@@ -542,6 +611,31 @@ export class CubeView {
 
     this._stepCamera(dt);
     if (!this.camTween) this.controls.update();
+
+    if (this.twisting) {
+      const tw = this.twisting;
+      tw.t = Math.min(1, tw.t + dt / tw.duration);
+      tw.pivot.setRotationFromAxisAngle(tw.axis, tw.angle * easeOut(tw.t));
+      if (tw.t >= 1) {
+        for (const id of tw.ids) {
+          const mesh = this.tiles[id];
+          if (!mesh) continue;
+          this.boardGroup.attach(mesh);
+          mesh.position.copy(mesh.userData.home.position);
+          mesh.quaternion.copy(mesh.userData.home.quaternion);
+          mesh.scale.setScalar(1);
+        }
+        this.boardGroup.remove(tw.pivot);
+        this.twisting = null;
+        this.refresh();
+        if (tw.onDone) tw.onDone();
+      }
+    }
+
+    if (this.flash && now - this.flash.start > this.flash.duration) {
+      this.flash = null;
+      this.refresh();
+    }
 
     // stone drop animation
     if (this.pops.size) {

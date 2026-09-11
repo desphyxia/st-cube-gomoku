@@ -169,6 +169,109 @@ export class CubeTopology {
     const next = this.step(this.lattice(id), d);
     return next && { id: this.fromLattice(next.p), d: next.d, p: next.p };
   }
+
+  /**
+   * The four edge-sharing neighbours of every cell, as a flat lookup table
+   * (cell id * 4 + k). Orthogonal steps never die at a cube corner, so every
+   * cell has exactly four. Built once and reused: region fills walk this
+   * constantly.
+   */
+  get orthogonal() {
+    if (this._orthogonal) return this._orthogonal;
+    const table = new Int32Array(this.cellCount * 4);
+    for (let id = 0; id < this.cellCount; id++) {
+      const { f } = this.decode(id);
+      const [u, v] = this.lineDirections(f);
+      const dirs = [u, neg(u), v, neg(v)];
+      for (let k = 0; k < 4; k++) {
+        const next = this.stepCell(id, dirs[k]);
+        if (!next) throw new Error('an orthogonal step should never be blocked');
+        table[id * 4 + k] = next.id;
+      }
+    }
+    this._orthogonal = table;
+    return table;
+  }
+
+  /**
+   * All eight neighbours of every cell as a flat table (cell id * 8 + k),
+   * with -1 where a diagonal dies at a cube corner. The opponent walks this
+   * constantly, so it is worth building once.
+   */
+  get neighbours() {
+    if (this._neighbours) return this._neighbours;
+    const table = new Int32Array(this.cellCount * 8).fill(-1);
+    for (let id = 0; id < this.cellCount; id++) {
+      const { f } = this.decode(id);
+      const dirs = this.allDirections(f);
+      for (let k = 0; k < 8; k++) {
+        const next = this.stepCell(id, dirs[k]);
+        table[id * 8 + k] = next ? next.id : -1;
+      }
+    }
+    this._neighbours = table;
+    return table;
+  }
+
+  /**
+   * Where every cell goes when one layer is twisted a quarter turn, as a
+   * permutation of cell ids. Layer `k` along `axis` is the slab of the cube
+   * between two cutting planes; the outermost layers carry their end cap
+   * along, which is exactly how a twisty puzzle behaves.
+   *
+   * On the doubled lattice the twist is an exact integer rotation about the
+   * axis, so a cell centre always lands on another cell centre.
+   */
+  twistPermutation(axis, layer, dir = 1) {
+    const n = this.size;
+    if (!Number.isInteger(axis) || axis < 0 || axis > 2) throw new RangeError('axis must be 0, 1 or 2');
+    if (!Number.isInteger(layer) || layer < 0 || layer >= n) throw new RangeError(`layer must be in [0, ${n - 1}]`);
+
+    const key = `${axis}:${layer}:${dir > 0 ? 1 : -1}`;
+    if (!this._twists) this._twists = new Map();
+    const cached = this._twists.get(key);
+    if (cached) return cached;
+
+    const b = (axis + 1) % 3;
+    const c = (axis + 2) % 3;
+    const slab = 2 * layer + 1 - n;
+    const perm = new Int32Array(this.cellCount);
+
+    for (let id = 0; id < this.cellCount; id++) {
+      const p = this.lattice(id);
+      const a = p[axis];
+      const inLayer = a === slab
+        || (layer === 0 && a === -n)
+        || (layer === n - 1 && a === n);
+      if (!inLayer) {
+        perm[id] = id;
+        continue;
+      }
+      const q = [p[0], p[1], p[2]];
+      if (dir > 0) {
+        q[b] = -p[c];
+        q[c] = p[b];
+      } else {
+        q[b] = p[c];
+        q[c] = -p[b];
+      }
+      perm[id] = this.fromLattice(q);
+    }
+    this._twists.set(key, perm);
+    return perm;
+  }
+
+  /** Cells belonging to one twist layer, for animation and for the AI. */
+  twistLayer(axis, layer) {
+    const n = this.size;
+    const slab = 2 * layer + 1 - n;
+    const out = [];
+    for (let id = 0; id < this.cellCount; id++) {
+      const a = this.lattice(id)[axis];
+      if (a === slab || (layer === 0 && a === -n) || (layer === n - 1 && a === n)) out.push(id);
+    }
+    return out;
+  }
 }
 
 export { neg };

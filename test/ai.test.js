@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { Game, P1, P2 } from '../src/js/game.js';
 import { CubeTopology } from '../src/js/cube.js';
 import { chooseMove, evaluateCell, DIFFICULTIES } from '../src/js/ai.js';
+import { MODES } from '../src/js/modes.js';
 
 const LEVELS = DIFFICULTIES.map((d) => d.id);
 
@@ -42,7 +43,7 @@ test('every level takes an immediate win', () => {
     place(game, lineCells(topo, topo.id(1, 0, 0), 0, 3), P2);
     game.turn = P1;
     const move = chooseMove(game, P1, level, seeded(5));
-    assert.ok(game.play(move), `${level} returned an illegal move`);
+    assert.ok(game.apply(move), `${level} returned an illegal move`);
     assert.equal(game.winner, P1, `${level} missed a win`);
   }
 });
@@ -57,7 +58,7 @@ test('medium and hard block an immediate loss', () => {
     place(game, run.slice(1, 5), P2);
     place(game, [run[0], topo.id(1, 1, 1)], P1);
     game.turn = P1;
-    assert.equal(chooseMove(game, P1, level, seeded(9)), run[5], `${level} let the win through`);
+    assert.equal(chooseMove(game, P1, level, seeded(9)).id, run[5], `${level} let the win through`);
   }
 });
 
@@ -74,7 +75,7 @@ test('a win beats a block when both are available', () => {
     probe.cells.set(game.cells);
     probe.turn = P1;
     const move = chooseMove(probe, P1, level, seeded(3));
-    assert.ok(probe.play(move), `${level} returned an illegal move`);
+    assert.ok(probe.apply(move), `${level} returned an illegal move`);
     assert.equal(probe.winner, P1, `${level} blocked instead of winning`);
   }
 });
@@ -100,10 +101,11 @@ test('moves are always legal, on every board size', () => {
       const game = new Game(size);
       const rng = seeded(size * 31 + level.length);
       for (let i = 0; i < 12 && !game.over; i++) {
-        const id = chooseMove(game, game.turn, level, rng);
-        assert.ok(id >= 0 && id < game.cells.length, `${level} returned ${id} on size ${size}`);
-        assert.equal(game.cells[id], 0, `${level} played an occupied cell on size ${size}`);
-        game.play(id);
+        const move = chooseMove(game, game.turn, level, rng);
+        assert.equal(move.t, 'place', 'classic has no other kind of move');
+        assert.ok(move.id >= 0 && move.id < game.cells.length, `${level} returned ${move.id} on size ${size}`);
+        assert.equal(game.cells[move.id], 0, `${level} played an occupied cell on size ${size}`);
+        game.apply(move);
       }
     }
   }
@@ -114,8 +116,8 @@ test('self-play runs to a decision without an illegal move', () => {
   const rng = seeded(77);
   let moves = 0;
   while (!game.over) {
-    const id = chooseMove(game, game.turn, moves % 2 ? 'hard' : 'medium', rng);
-    assert.ok(game.play(id), `illegal move at ply ${moves}`);
+    const move = chooseMove(game, game.turn, moves % 2 ? 'hard' : 'medium', rng);
+    assert.ok(game.apply(move), `illegal move at ply ${moves}`);
     moves++;
     assert.ok(moves <= game.cells.length, 'self-play failed to terminate');
   }
@@ -127,7 +129,7 @@ test('the difficulties are ordered by strength', () => {
     const rng = seeded(seed);
     const game = new Game(5, { first: P1 });
     while (!game.over && game.moves.length < game.cells.length) {
-      game.play(chooseMove(game, game.turn, levels[game.turn === P1 ? 0 : 1], rng));
+      game.apply(chooseMove(game, game.turn, levels[game.turn === P1 ? 0 : 1], rng));
     }
     return game.winner;
   };
@@ -140,5 +142,41 @@ test('the difficulties are ordered by strength', () => {
       if (run(levels, 400 + i * 17) === strongSeat) wins++;
     }
     assert.ok(wins >= needed, `${strong} won only ${wins}/8 against ${weak}`);
+  }
+});
+
+test('the difficulty ladder survives in every mode', () => {
+  const run = (mode, levels, seed) => {
+    const rng = seeded(seed);
+    const game = new Game(5, { first: P1, mode });
+    while (!game.over && game.moves.length < game.plyLimit) {
+      game.apply(chooseMove(game, game.turn, levels[game.turn === P1 ? 0 : 1], rng));
+    }
+    return game.winner;
+  };
+  for (const mode of ['classic', 'torque', 'encircle']) {
+    let wins = 0;
+    for (let i = 0; i < 6; i++) {
+      const strongSeat = i % 2 === 0 ? P1 : P2;
+      const levels = i % 2 === 0 ? ['hard', 'easy'] : ['easy', 'hard'];
+      if (run(mode, levels, 700 + i * 29) === strongSeat) wins++;
+    }
+    assert.ok(wins >= 5, `hard won only ${wins}/6 against easy in ${mode}`);
+  }
+});
+
+test('the computer never twists the opponent into a win', () => {
+  for (let i = 0; i < 40; i++) {
+    const rng = seeded(3000 + i);
+    const game = new Game(5, { first: P1, mode: 'torque' });
+    while (!game.over && game.moves.length < game.plyLimit) {
+      const mover = game.turn;
+      const move = chooseMove(game, mover, ['easy', 'medium', 'hard'][i % 3], rng);
+      game.apply(move);
+      if (game.over && move.t === 'twist') {
+        assert.notEqual(game.winner, mover === P1 ? P2 : P1,
+          `a twist handed the game away at ply ${game.moves.length}`);
+      }
+    }
   }
 });

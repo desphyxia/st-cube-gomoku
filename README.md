@@ -4,11 +4,35 @@ Five-in-a-row played on the **surface of a cube**. A row does not stop at the
 edge of a face — it rolls over onto the next one and keeps going straight, so
 the threat that beats you is usually on the face you are not looking at.
 
-A three.js remake of an Android/iOS game from 2012, with Steam peer-to-peer
-multiplayer, a computer opponent at three difficulties, configurable board
-sizes, and three switchable visual themes.
+A three.js remake of an Android/iOS game from 2012, with three game modes,
+Steam peer-to-peer multiplayer, a computer opponent at three difficulties,
+configurable board sizes, and three switchable visual themes.
 
 ![themes](docs/themes.png)
+
+## Modes
+
+Picked before a game starts. **Roll the dice** chooses one at random every
+game, rematches included, so the mode is re-rolled each time.
+
+| | |
+|---|---|
+| **Classic** | Five in a row, rolling over every edge. |
+| **Torque** | Five in a row still wins, but a turn can be spent twisting one layer of the cube a quarter turn instead of placing. Stones travel with the tiles. Two twists each for the whole game. A twist that leaves five in a row wins it for whoever owns it — and leaving five for *both* hands the game to the player who did not twist. |
+| **Encirclement** | Five in a row still wins, and your stones also cut the surface. Close a loop and the smaller side is inside it; every enemy stone in there is swept off, freeing the tile. Sweep their last stone off the cube and you win outright. Split the cube exactly in half and neither side is inside, so nothing is swept. |
+
+A twist is an exact 90° integer rotation of the affected cells on the same
+doubled lattice the rest of the geometry uses, so a cell centre always lands on
+another cell centre. The outermost layers carry their end cap along, exactly as
+a twisty puzzle does; `npm test` checks the permutation is a bijection, has
+order four, is the inverse of the opposite turn, and never moves a cell out of
+its layer.
+
+Encirclement costs scale sub-linearly, because the cube's curvature is
+concentrated in its eight corners: four stones sweep a single stone, seven
+sweep a four-cell pocket, ten sweep a twelve-cell pocket, and twenty take a
+whole face. Regions are edge-connected and the fence blocks diagonally, which
+is the pairing that makes a closed loop actually separate the surface.
 
 ## Rules
 
@@ -74,6 +98,23 @@ What separates the levels is how much of that signal each is allowed to act on.
 | **Medium** | Always takes a win, always blocks yours, and will not let a double-four stand. Picks loosely among its near-best moves so it does not play the same game twice. |
 | **Hard** | Adds forks — two threats at once cannot both be answered — and plays out its leading moves to see what your best reply would be worth, discounting anything that hands back more than it creates. |
 
+In Torque it also hunts for a twist that finishes its own line, and spends one
+defensively when the opponent holds a twist that wins on the spot — the one
+threat no stone can block. In Encirclement it values sweeping and being swept.
+Hard's fork chain is tuned for Classic, where it wins 9-0 against Medium; in
+the other two modes that same chain measured *worse* than simply taking the
+best-valued move, so there it keeps Medium's selection and layers its extra
+checks on top. Measured 12 games a pairing on a 5-cube:
+
+| | hard v easy | medium v easy | hard v medium |
+|---|---|---|---|
+| Classic | 12-0 | 12-0 | 9-0 |
+| Torque | 12-0 | 12-0 | 7-5 |
+| Encirclement | 12-0 | 12-0 | 9-3 |
+
+Across 200 Torque games the computer never once twisted the opponent into a
+win, which is a test rather than a hope.
+
 Measured over 20 games a side on a 5-cube: hard beat easy 20–0, medium beat
 easy 20–0, and hard beat medium 17–2. A move costs under 2 ms at medium and
 around 25 ms at hard, so it runs on the main thread; the pause before it plays
@@ -102,6 +143,7 @@ src/js/cube.js       Cube topology — cells, face frames, and the edge-folding
 src/js/game.js       Rules: legality, turn order, win detection. Pure logic.
 src/js/view.js       three.js scene, tiles, picking, camera work.
 src/js/themes.js     The three themes.
+src/js/modes.js      The three game modes and the random roll.
 src/js/ai.js         The computer opponent: threat scoring and the three
                      difficulty ladders.
 src/js/net.js        Wire protocol and the renderer half of the bridge.

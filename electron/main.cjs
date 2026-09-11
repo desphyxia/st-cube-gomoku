@@ -12,7 +12,7 @@ const { app, BrowserWindow, ipcMain, shell } = require('electron');
 
 const APP_ID = 480;            // Spacewar, Valve's public test app id
 const LOBBY_TAG = 'cube5';
-const PROTOCOL_VERSION = '1';
+const PROTOCOL_VERSION = '2';
 const POLL_MS = 40;
 
 let win = null;

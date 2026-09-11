@@ -4,12 +4,13 @@
  *
  *   hello   { name }              sent by both sides once connected
  *   start   { size, first }       host only: begins (or restarts) a game
- *   move    { id, n }             a stone placement, n = move number
+ *   move    { move, n }           { t:'place', id } or { t:'twist', axis, layer, dir }
+ *   start   also carries `rules`, the game mode for this game
  *   resign  { }
  *   rematch { }                   a request; the host answers with `start`
  *   bye     { }
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 export class Net {
   constructor() {

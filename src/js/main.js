@@ -8,6 +8,7 @@ import { CubeView } from './view.js';
 import { Net } from './net.js';
 import { THEMES, DEFAULT_THEME, themeById, applyThemeToDocument } from './themes.js';
 import { DIFFICULTIES, DEFAULT_DIFFICULTY, difficultyById, chooseMove } from './ai.js';
+import { MODES, RANDOM_MODE, DEFAULT_MODE, modeById, resolveMode } from './modes.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -15,6 +16,8 @@ const state = {
   screen: 'title',
   mode: null,        // 'online' | 'hotseat' | 'ai'
   difficulty: DEFAULT_DIFFICULTY,
+  modeChoice: DEFAULT_MODE,   // menu selection, may be 'random'
+  rules: DEFAULT_MODE,        // the mode actually in play
   isHost: false,
   seat: P1,          // which player I am in an online game
   size: 5,
@@ -68,6 +71,50 @@ function buildThemeButtons() {
     btn.dataset.theme = theme.id;
     btn.addEventListener('click', () => setTheme(theme.id));
     host.appendChild(btn);
+  }
+}
+
+// -------------------------------------------------------------- game modes
+
+function setModeChoice(id) {
+  const choice = id === RANDOM_MODE.id ? RANDOM_MODE : modeById(id);
+  state.modeChoice = choice.id;
+  $('mode-note').textContent = choice.blurb;
+  for (const btn of $('mode-buttons').children) {
+    btn.classList.toggle('on', btn.dataset.mode === choice.id);
+  }
+  store.set('cube5.modeChoice', choice.id);
+  if (choice === RANDOM_MODE) {
+    $('help-mode').textContent = `${choice.name} — ${choice.blurb}`;
+    $('help-mode-rules').innerHTML = '';
+  } else {
+    showModeRules(choice.id);
+  }
+}
+
+function buildModeButtons() {
+  const host = $('mode-buttons');
+  host.innerHTML = '';
+  for (const choice of [...MODES, RANDOM_MODE]) {
+    const btn = document.createElement('button');
+    btn.textContent = choice.name;
+    btn.title = choice.blurb;
+    btn.dataset.mode = choice.id;
+    btn.addEventListener('click', () => setModeChoice(choice.id));
+    host.appendChild(btn);
+  }
+}
+
+/** Fill the help card with the rules of whichever mode is in play. */
+function showModeRules(id) {
+  const mode = modeById(id);
+  $('help-mode').textContent = `${mode.name} — ${mode.blurb}`;
+  const list = $('help-mode-rules');
+  list.innerHTML = '';
+  for (const rule of mode.rules) {
+    const li = document.createElement('li');
+    li.textContent = rule;
+    list.appendChild(li);
   }
 }
 
@@ -126,10 +173,65 @@ function maybeAiMove() {
 
   aiTimer = setTimeout(() => {
     if (token !== aiToken || state.mode !== 'ai' || state.game !== game || game.over) return;
-    const id = chooseMove(game, game.turn, level);
-    if (id >= 0 && game.legal(id)) commitMove(id, { remote: true });
+    const move = chooseMove(game, game.turn, level);
+    if (move) commitMove(move, { remote: true });
     else syncHud();
   }, 340 + Math.random() * 280);
+}
+
+// ------------------------------------------------------------- twist panel
+
+const twistDraft = { axis: 0, layer: 0, dir: 1 };
+
+function segment(host, items, get, set) {
+  host.innerHTML = '';
+  for (const item of items) {
+    const btn = document.createElement('button');
+    btn.textContent = item.label;
+    btn.addEventListener('click', () => {
+      set(item.value);
+      paintTwistPanel();
+      view.setHighlight({ axis: twistDraft.axis, layer: twistDraft.layer });
+    });
+    btn.dataset.value = String(item.value);
+    host.appendChild(btn);
+  }
+  host.dataset.get = '';
+  host._get = get;
+}
+
+function paintTwistPanel() {
+  for (const host of [$('twist-axis'), $('twist-layer'), $('twist-dir')]) {
+    const current = String(host._get());
+    for (const btn of host.children) btn.classList.toggle('on', btn.dataset.value === current);
+  }
+}
+
+function buildTwistPanel() {
+  segment($('twist-axis'), [
+    { label: 'X', value: 0 }, { label: 'Y', value: 1 }, { label: 'Z', value: 2 },
+  ], () => twistDraft.axis, (v) => { twistDraft.axis = v; });
+  const layers = [];
+  for (let i = 0; i < state.size; i++) layers.push({ label: String(i + 1), value: i });
+  segment($('twist-layer'), layers, () => twistDraft.layer, (v) => { twistDraft.layer = v; });
+  segment($('twist-dir'), [
+    { label: '\u21bb', value: 1 }, { label: '\u21ba', value: -1 },
+  ], () => twistDraft.dir, (v) => { twistDraft.dir = v; });
+  if (twistDraft.layer >= state.size) twistDraft.layer = 0;
+  paintTwistPanel();
+}
+
+function openTwistPanel() {
+  const g = state.game;
+  if (!g || g.over || !g.canTwist(g.turn)) return;
+  buildTwistPanel();
+  $('twist-panel').classList.remove('hidden');
+  view.setHighlight({ axis: twistDraft.axis, layer: twistDraft.layer });
+}
+
+function closeTwistPanel() {
+  $('twist-panel').classList.add('hidden');
+  view.setHighlight(null);
 }
 
 // -------------------------------------------------------------------- screens
@@ -140,6 +242,7 @@ function show(screen) {
   $('screen-browse').classList.toggle('hidden', screen !== 'browse');
   $('screen-wait').classList.toggle('hidden', screen !== 'wait');
   $('hud').classList.toggle('hidden', screen !== 'game');
+  if (screen !== 'game') closeTwistPanel();
   if (screen !== 'game') $('result').classList.add('hidden');
   view.autoRotate = screen !== 'game';
   view.setInteractive(false);
@@ -190,14 +293,17 @@ function setSize(n) {
 
 // ----------------------------------------------------------------- game flow
 
-function startGame({ size, first, mode, seat, isHost }) {
+function startGame({ size, first, mode, seat, isHost, rules }) {
   cancelAi();
   state.mode = mode;
   state.seat = seat;
   state.isHost = isHost;
   state.size = size;
   state.rematchPending = false;
-  state.game = new Game(size, { first });
+  state.rules = rules || resolveMode(state.modeChoice);
+  state.game = new Game(size, { first, mode: state.rules });
+  $('mode-chip').textContent = modeById(state.rules).name;
+  showModeRules(state.rules);
   if (mode === 'ai') state.them = `Computer · ${difficultyById(state.difficulty).name}`;
   view.setGame(state.game);
   $('result').classList.add('hidden');
@@ -235,30 +341,61 @@ function syncHud() {
   }
 
   $('btn-resign').disabled = g.over;
-  view.setInteractive(!g.over && myTurn, (id) => g.legal(id));
+
+  const seat = state.mode === 'hotseat' ? g.turn : state.seat;
+  const twistBtn = $('btn-twist');
+  twistBtn.classList.toggle('hidden', g.mode !== 'torque');
+  twistBtn.textContent = `Twist a layer (${g.twists[seat]})`;
+  twistBtn.disabled = g.over || !myTurn || g.twists[seat] <= 0;
+  if (twistBtn.disabled) closeTwistPanel();
+
+  view.setInteractive(!g.over && myTurn && !view.busy, (id) => g.legal(id));
 }
 
 /** Apply a move that has already been validated, from either side. */
-function commitMove(id, { remote }) {
+function commitMove(move, { remote }) {
   const g = state.game;
-  if (!g || !g.play(id)) return false;
-  view.popCell(id);
+  if (!g || !move) return false;
+
+  if (move.t === 'twist') {
+    const mover = g.turn;
+    if (!g.twist(move.axis, move.layer, move.dir)) return false;
+    closeTwistPanel();
+    view.setInteractive(false);
+    toast(`${mover === state.seat || state.mode === 'hotseat' ? 'Layer twisted' : `${state.them} twisted a layer`}`);
+    // Everything else waits for the quarter turn to finish playing out.
+    view.startTwist(move, () => {
+      view.refresh();
+      syncHud();
+      if (g.over) announceResult();
+      else maybeAiMove();
+    });
+    return true;
+  }
+
+  if (!g.play(move.id)) return false;
+  view.popCell(move.id);
   view.refresh();
-  if (remote && view.cellVisibility(id) < 0.3) view.focusCell(id);
+  if (g.lastSweep && g.lastSweep.length) {
+    view.flashCells(g.lastSweep);
+    toast(`Swept ${g.lastSweep.length} stone${g.lastSweep.length === 1 ? '' : 's'} off the cube`);
+  }
+  if (remote && view.cellVisibility(move.id) < 0.3) view.focusCell(move.id);
   syncHud();
   if (g.over) announceResult();
   else maybeAiMove();
   return true;
 }
 
-function playHere(id) {
+/** A move made by whoever is sitting at this screen. */
+function submitMove(move) {
   const g = state.game;
-  if (!g || g.over) return;
+  if (!g || g.over || view.busy) return;
   const mover = g.turn;
   if (state.mode !== 'hotseat' && mover !== state.seat) return;
   const n = g.moves.length;
-  if (!commitMove(id, { remote: false })) return;
-  if (state.mode === 'online') net.send('move', { id, n });
+  if (!commitMove(move, { remote: false })) return;
+  if (state.mode === 'online') net.send('move', { move, n });
 }
 
 function announceResult() {
@@ -291,7 +428,12 @@ function announceResult() {
 }
 
 function describeLine(g) {
-  if (!g.winningLine) return 'The game was resigned.';
+  if (!g.winningLine) {
+    if (g.mode === 'encircle' && g.winner > 0 && g.swept[g.winner] > 0) {
+      return `Swept the last stone off the cube — ${g.swept[g.winner]} in all.`;
+    }
+    return 'The game was resigned.';
+  }
   const faces = new Set(g.winningLine.map((id) => g.topo.decode(id).f)).size;
   const run = g.winningLine.length;
   return faces > 1
@@ -385,8 +527,9 @@ net.on('event', (ev) => {
     net.send('hello', { name: state.me });
     if (state.isHost) {
       const first = hostFirstPlayer();
-      net.send('start', { size: state.size, first });
-      startGame({ size: state.size, first, mode: 'online', seat: P1, isHost: true });
+      const rules = resolveMode(state.modeChoice);
+      net.send('start', { size: state.size, first, rules });
+      startGame({ size: state.size, first, rules, mode: 'online', seat: P1, isHost: true });
       toast('Opponent connected');
     }
   } else if (ev.type === 'peer-lost') {
@@ -425,8 +568,8 @@ net.on('message', (msg) => {
     case 'start':
       // Only the host issues `start`; the guest always plays second seat.
       if (state.isHost) break;
-      startGame({ size: msg.size, first: msg.first, mode: 'online', seat: P2, isHost: false });
-      toast(msg.first === P2 ? 'You move first' : `${state.them} moves first`);
+      startGame({ size: msg.size, first: msg.first, rules: msg.rules, mode: 'online', seat: P2, isHost: false });
+      toast(`${modeById(msg.rules).name} — ${msg.first === P2 ? 'you move first' : `${state.them} moves first`}`);
       break;
 
     case 'move': {
@@ -437,7 +580,7 @@ net.on('message', (msg) => {
         toast('Move out of sequence — ignoring', 3000);
         break;
       }
-      if (!commitMove(msg.id, { remote: true })) toast('Opponent sent an illegal move', 3000);
+      if (!commitMove(msg.move, { remote: true })) toast('Opponent sent an illegal move', 3000);
       break;
     }
 
@@ -456,9 +599,10 @@ net.on('message', (msg) => {
     case 'rematch':
       if (state.isHost) {
         const first = state.game ? (state.game.first === P1 ? P2 : P1) : P1;
-        net.send('start', { size: state.size, first });
-        startGame({ size: state.size, first, mode: 'online', seat: P1, isHost: true });
-        toast('Rematch — colours stay, the first move swaps');
+        const rules = resolveMode(state.modeChoice);
+        net.send('start', { size: state.size, first, rules });
+        startGame({ size: state.size, first, rules, mode: 'online', seat: P1, isHost: true });
+        toast(`Rematch — ${modeById(rules).name}, the first move swaps`);
       } else {
         toast(`${state.them} wants a rematch`);
       }
@@ -482,7 +626,16 @@ net.on('message', (msg) => {
 
 // ------------------------------------------------------------------- wiring
 
-view.onPick((id) => playHere(id));
+view.onPick((id) => submitMove({ t: 'place', id }));
+
+$('btn-twist').addEventListener('click', () => {
+  if ($('twist-panel').classList.contains('hidden')) openTwistPanel();
+  else closeTwistPanel();
+});
+$('twist-cancel').addEventListener('click', closeTwistPanel);
+$('twist-go').addEventListener('click', () => {
+  submitMove({ t: 'twist', axis: twistDraft.axis, layer: twistDraft.layer, dir: twistDraft.dir });
+});
 
 $('btn-ai').addEventListener('click', () => {
   startGame({ size: state.size, first: P1, mode: 'ai', seat: P1, isHost: true });
@@ -559,8 +712,9 @@ $('btn-rematch').addEventListener('click', () => {
   }
   if (state.isHost) {
     const first = state.game.first === P1 ? P2 : P1;
-    net.send('start', { size: state.size, first });
-    startGame({ size: state.size, first, mode: 'online', seat: P1, isHost: true });
+    const rules = resolveMode(state.modeChoice);
+    net.send('start', { size: state.size, first, rules });
+    startGame({ size: state.size, first, rules, mode: 'online', seat: P1, isHost: true });
   } else {
     net.send('rematch');
     $('btn-rematch').disabled = true;
@@ -587,8 +741,10 @@ window.addEventListener('keydown', (ev) => {
 async function boot() {
   buildThemeButtons();
   buildDifficultyButtons();
+  buildModeButtons();
   setTheme(store.get('cube5.theme', DEFAULT_THEME));
   setDifficulty(store.get('cube5.difficulty', DEFAULT_DIFFICULTY));
+  setModeChoice(store.get('cube5.modeChoice', DEFAULT_MODE));
   setSize(Number(store.get('cube5.size', 5)) || 5);
   show('title');
 
