@@ -5,7 +5,8 @@ edge of a face — it rolls over onto the next one and keeps going straight, so
 the threat that beats you is usually on the face you are not looking at.
 
 A three.js remake of an Android/iOS game from 2012, with Steam peer-to-peer
-multiplayer, configurable board sizes, and three switchable visual themes.
+multiplayer, a computer opponent at three difficulties, configurable board
+sizes, and three switchable visual themes.
 
 ![themes](docs/themes.png)
 
@@ -49,8 +50,34 @@ paths:
 running during development. Ship a real App ID by changing `APP_ID` in
 `electron/main.cjs` and that file.
 
-Without Steam the menu says so and online play is disabled; **two players, one
-screen** still works, which is also the quickest way to try the game.
+Without Steam the menu says so and online play is disabled; **Play the
+computer** and **two players, one screen** still work, and are the quickest way
+to try the game.
+
+## The computer opponent
+
+Every candidate cell is judged by sliding a five-window along each of the four
+line axes through it and counting the windows still *live* — free of opponent
+stones, and free of the walls where a diagonal dies at a cube corner. A window
+holding four of my stones is one move from a win; holding two it is a distant
+promise. Counting live windows rather than matching literal patterns means
+gapped shapes (`oo.oo`) and lines that roll over a face edge need no special
+case. Each cell is scored for the opponent too, since a cell that is valuable
+to them is worth denying. Search is confined to cells within a step or two of
+an existing stone.
+
+What separates the levels is how much of that signal each is allowed to act on.
+
+| | |
+|---|---|
+| **Easy** | Always takes a win, but notices your winning move only about half the time, and wanders off the best line roughly a third of the time. |
+| **Medium** | Always takes a win, always blocks yours, and will not let a double-four stand. Picks loosely among its near-best moves so it does not play the same game twice. |
+| **Hard** | Adds forks — two threats at once cannot both be answered — and plays out its leading moves to see what your best reply would be worth, discounting anything that hands back more than it creates. |
+
+Measured over 20 games a side on a 5-cube: hard beat easy 20–0, medium beat
+easy 20–0, and hard beat medium 17–2. A move costs under 2 ms at medium and
+around 25 ms at hard, so it runs on the main thread; the pause before it plays
+is deliberate, not the search.
 
 ## Themes
 
@@ -75,6 +102,8 @@ src/js/cube.js       Cube topology — cells, face frames, and the edge-folding
 src/js/game.js       Rules: legality, turn order, win detection. Pure logic.
 src/js/view.js       three.js scene, tiles, picking, camera work.
 src/js/themes.js     The three themes.
+src/js/ai.js         The computer opponent: threat scoring and the three
+                     difficulty ladders.
 src/js/net.js        Wire protocol and the renderer half of the bridge.
 src/js/main.js       Controller tying the three together.
 ```
@@ -110,5 +139,4 @@ not legal.
 
 ## Not included
 
-Deliberately scoped to the core game: no match history, no chat, no ranking, no
-AI opponent.
+Deliberately scoped to the core game: no match history, no chat, no ranking.

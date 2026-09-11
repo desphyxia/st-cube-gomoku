@@ -26,10 +26,17 @@
         <p class="tagline">Five in a row — all the way around.</p>
 
         <div class="menu">
-          <button id="btn-host" class="primary">Host a game</button>
+          <button id="btn-ai" class="primary">Play the computer</button>
+          <button id="btn-host">Host a game</button>
           <button id="btn-browse">Join a game</button>
           <button id="btn-local">Two players, one screen</button>
         </div>
+
+        <div class="row">
+          <span class="label">Computer</span>
+          <div id="difficulty-buttons" class="seg"></div>
+        </div>
+        <p id="difficulty-note" class="hint blurb"></p>
 
         <div class="row size-row">
           <span class="label">Board</span>
@@ -106,7 +113,7 @@
     </div>
 
     <!-- --------------------------------------------------------- result --->
-    <div id="result" class="screen center hidden">
+    <div id="result" class="screen center left hidden">
       <div class="panel">
         <h2 id="result-title">You won</h2>
         <p id="result-body" class="hint"></p>

@@ -55,6 +55,7 @@ export class CubeView {
 
     this.camTween = null;
     this._showcase = false;
+    this._bias = false;
     this.radiusScale = 1;
     this.startedAt = performance.now();
     this.lastFrameAt = this.startedAt;
@@ -83,7 +84,7 @@ export class CubeView {
     this.camera.aspect = w / h;
     // Menu panels sit on the left, so shift the rendered scene to the right
     // rather than letting the cube hide behind them.
-    const bias = this._showcase && w > 820 ? 0.19 : 0;
+    const bias = this._bias && w > 820 ? 0.19 : 0;
     if (bias) this.camera.setViewOffset(w, h, -bias * w, 0, w, h);
     else this.camera.clearViewOffset();
     this.camera.updateProjectionMatrix();
@@ -100,8 +101,19 @@ export class CubeView {
     if (this._showcase === on) return;
     this._showcase = on;
     this.radiusScale = on ? 1.14 : 1;
-    this.resize();
+    this.setPanelBias(on);
     this.resetView(true);
+  }
+
+  /**
+   * Shift the rendered scene right so a panel on the left does not cover the
+   * board. Unlike setShowcase this leaves the camera where it is, so the
+   * result card can appear beside the winning line instead of on top of it.
+   */
+  setPanelBias(on) {
+    if (this._bias === on) return;
+    this._bias = on;
+    this.resize();
   }
 
   // -------------------------------------------------------------------- board
@@ -473,7 +485,7 @@ export class CubeView {
   // ------------------------------------------------------------------- camera
 
   /** Swing the camera round so a given cell faces the viewer. */
-  focusCell(id, duration = 0.75) {
+  focusCell(id, duration = 0.75, pullBack = 1) {
     const mesh = this.tiles[id];
     if (!mesh) return;
     const face = FACES[mesh.userData.face];
@@ -481,7 +493,7 @@ export class CubeView {
       .addScaledVector(new THREE.Vector3().fromArray(face.u), 0.46)
       .addScaledVector(new THREE.Vector3().fromArray(face.v), 0.32)
       .normalize();
-    this._tweenCameraTo(dir, duration);
+    this._tweenCameraTo(dir, duration, pullBack);
   }
 
   /** The default three-faces-visible angle. */
@@ -490,9 +502,9 @@ export class CubeView {
     this._tweenCameraTo(dir, animated ? 0.6 : 0);
   }
 
-  _tweenCameraTo(dir, duration) {
+  _tweenCameraTo(dir, duration, pullBack = 1) {
     const n = this.game ? this.game.size : 5;
-    const radius = (n * 2.05 + 4.2) * this.radiusScale;
+    const radius = (n * 2.05 + 4.2) * this.radiusScale * pullBack;
     const target = dir.multiplyScalar(radius);
     if (duration <= 0) {
       this.camera.position.copy(target);

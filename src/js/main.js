@@ -7,12 +7,14 @@ import { Game, P1, P2 } from './game.js';
 import { CubeView } from './view.js';
 import { Net } from './net.js';
 import { THEMES, DEFAULT_THEME, themeById, applyThemeToDocument } from './themes.js';
+import { DIFFICULTIES, DEFAULT_DIFFICULTY, difficultyById, chooseMove } from './ai.js';
 
 const $ = (id) => document.getElementById(id);
 
 const state = {
   screen: 'title',
-  mode: null,        // 'online' | 'hotseat'
+  mode: null,        // 'online' | 'hotseat' | 'ai'
+  difficulty: DEFAULT_DIFFICULTY,
   isHost: false,
   seat: P1,          // which player I am in an online game
   size: 5,
@@ -69,6 +71,67 @@ function buildThemeButtons() {
   }
 }
 
+// ---------------------------------------------------------------- difficulty
+
+function setDifficulty(id) {
+  const level = difficultyById(id);
+  state.difficulty = level.id;
+  $('difficulty-note').textContent = level.blurb;
+  for (const btn of $('difficulty-buttons').children) {
+    btn.classList.toggle('on', btn.dataset.level === level.id);
+  }
+  store.set('cube5.difficulty', level.id);
+}
+
+function buildDifficultyButtons() {
+  const host = $('difficulty-buttons');
+  host.innerHTML = '';
+  for (const level of DIFFICULTIES) {
+    const btn = document.createElement('button');
+    btn.textContent = level.name;
+    btn.title = level.blurb;
+    btn.dataset.level = level.id;
+    btn.addEventListener('click', () => setDifficulty(level.id));
+    host.appendChild(btn);
+  }
+}
+
+// ------------------------------------------------------------ the computer
+
+let aiTimer = null;
+let aiToken = 0;
+
+function cancelAi() {
+  clearTimeout(aiTimer);
+  aiTimer = null;
+  aiToken++;
+}
+
+/**
+ * Hand the turn to the computer if it is its move. The pause is deliberate:
+ * the search itself takes a few milliseconds and an instant reply reads as a
+ * glitch rather than a move.
+ */
+function maybeAiMove() {
+  if (state.mode !== 'ai') return;
+  const game = state.game;
+  if (!game || game.over || game.turn === state.seat) return;
+
+  const token = ++aiToken;
+  const level = state.difficulty;
+  const line = $('turn-line');
+  line.textContent = `${state.them} is thinking…`;
+  line.classList.remove('active');
+  view.setInteractive(false);
+
+  aiTimer = setTimeout(() => {
+    if (token !== aiToken || state.mode !== 'ai' || state.game !== game || game.over) return;
+    const id = chooseMove(game, game.turn, level);
+    if (id >= 0 && game.legal(id)) commitMove(id, { remote: true });
+    else syncHud();
+  }, 340 + Math.random() * 280);
+}
+
 // -------------------------------------------------------------------- screens
 
 function show(screen) {
@@ -81,6 +144,7 @@ function show(screen) {
   view.autoRotate = screen !== 'game';
   view.setInteractive(false);
   view.setShowcase(screen !== 'game');
+  view.setPanelBias(screen !== 'game');
   if (screen === 'title') showcase();
 }
 
@@ -127,16 +191,19 @@ function setSize(n) {
 // ----------------------------------------------------------------- game flow
 
 function startGame({ size, first, mode, seat, isHost }) {
+  cancelAi();
   state.mode = mode;
   state.seat = seat;
   state.isHost = isHost;
   state.size = size;
   state.rematchPending = false;
   state.game = new Game(size, { first });
+  if (mode === 'ai') state.them = `Computer · ${difficultyById(state.difficulty).name}`;
   view.setGame(state.game);
   $('result').classList.add('hidden');
   show('game');
   syncHud();
+  maybeAiMove();
 }
 
 function syncHud() {
@@ -180,6 +247,7 @@ function commitMove(id, { remote }) {
   if (remote && view.cellVisibility(id) < 0.3) view.focusCell(id);
   syncHud();
   if (g.over) announceResult();
+  else maybeAiMove();
   return true;
 }
 
@@ -187,7 +255,7 @@ function playHere(id) {
   const g = state.game;
   if (!g || g.over) return;
   const mover = g.turn;
-  if (state.mode === 'online' && mover !== state.seat) return;
+  if (state.mode !== 'hotseat' && mover !== state.seat) return;
   const n = g.moves.length;
   if (!commitMove(id, { remote: false })) return;
   if (state.mode === 'online') net.send('move', { id, n });
@@ -216,7 +284,10 @@ function announceResult() {
   $('btn-rematch').textContent = 'Rematch';
   $('btn-rematch').disabled = false;
   overlay.classList.remove('hidden');
-  if (g.winningLine) view.focusCell(g.winningLine[Math.floor(g.winningLine.length / 2)]);
+  // Swing the camera onto the winning line and shove the board clear of the
+  // card, so the player can actually see how it ended.
+  view.setPanelBias(true);
+  if (g.winningLine) view.focusCell(g.winningLine[Math.floor(g.winningLine.length / 2)], 0.75, 1.16);
 }
 
 function describeLine(g) {
@@ -229,6 +300,7 @@ function describeLine(g) {
 }
 
 function leaveGame() {
+  cancelAi();
   if (state.mode === 'online') {
     net.send('bye');
     net.leave();
@@ -412,6 +484,9 @@ net.on('message', (msg) => {
 
 view.onPick((id) => playHere(id));
 
+$('btn-ai').addEventListener('click', () => {
+  startGame({ size: state.size, first: P1, mode: 'ai', seat: P1, isHost: true });
+});
 $('btn-host').addEventListener('click', doHost);
 $('btn-browse').addEventListener('click', doBrowse);
 $('btn-local').addEventListener('click', () => {
@@ -471,6 +546,12 @@ $('btn-leave').addEventListener('click', leaveGame);
 $('btn-result-leave').addEventListener('click', leaveGame);
 
 $('btn-rematch').addEventListener('click', () => {
+  if (state.mode === 'ai') {
+    // Whoever moved first last time moves second now.
+    const first = state.game.first === P1 ? P2 : P1;
+    startGame({ size: state.size, first, mode: 'ai', seat: P1, isHost: true });
+    return;
+  }
   if (state.mode === 'hotseat') {
     const first = state.game.first === P1 ? P2 : P1;
     startGame({ size: state.size, first, mode: 'hotseat', seat: P1, isHost: true });
@@ -505,7 +586,9 @@ window.addEventListener('keydown', (ev) => {
 
 async function boot() {
   buildThemeButtons();
+  buildDifficultyButtons();
   setTheme(store.get('cube5.theme', DEFAULT_THEME));
+  setDifficulty(store.get('cube5.difficulty', DEFAULT_DIFFICULTY));
   setSize(Number(store.get('cube5.size', 5)) || 5);
   show('title');
 
@@ -516,7 +599,7 @@ async function boot() {
     line.textContent = `Steam: signed in as ${state.me} (App ID ${status.appId})`;
     line.classList.remove('bad');
   } else {
-    line.textContent = `Steam unavailable — ${status.error}. Online play is disabled; two players on one screen still works.`;
+    line.textContent = `Steam unavailable — ${status.error}. Online play is disabled; the computer opponent and two players on one screen still work.`;
     line.classList.add('bad');
     $('btn-host').disabled = true;
     $('btn-browse').disabled = true;
