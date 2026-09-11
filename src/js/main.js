@@ -1,0 +1,526 @@
+/**
+ * Application controller: owns the rules object, the three.js view and the
+ * Steam transport, and keeps the three of them in agreement.
+ */
+import { MIN_SIZE, MAX_SIZE } from './cube.js';
+import { Game, P1, P2 } from './game.js';
+import { CubeView } from './view.js';
+import { Net } from './net.js';
+import { THEMES, DEFAULT_THEME, themeById, applyThemeToDocument } from './themes.js';
+
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  screen: 'title',
+  mode: null,        // 'online' | 'hotseat'
+  isHost: false,
+  seat: P1,          // which player I am in an online game
+  size: 5,
+  me: 'You',
+  them: 'Opponent',
+  game: null,
+  connected: false,
+  rematchPending: false,
+};
+
+const view = new CubeView($('stage'));
+const net = new Net();
+
+// ------------------------------------------------------------------ storage
+
+const store = {
+  get(key, fallback) {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? fallback : v;
+    } catch {
+      return fallback;
+    }
+  },
+  set(key, value) {
+    try {
+      localStorage.setItem(key, String(value));
+    } catch { /* storage disabled; preferences just will not persist */ }
+  },
+};
+
+// -------------------------------------------------------------------- themes
+
+function setTheme(id) {
+  const theme = themeById(id);
+  applyThemeToDocument(theme);
+  view.setTheme(theme);
+  store.set('cube5.theme', theme.id);
+  for (const btn of $('theme-buttons').children) {
+    btn.classList.toggle('on', btn.dataset.theme === theme.id);
+  }
+}
+
+function buildThemeButtons() {
+  const host = $('theme-buttons');
+  host.innerHTML = '';
+  for (const theme of THEMES) {
+    const btn = document.createElement('button');
+    btn.textContent = theme.name;
+    btn.title = theme.tagline;
+    btn.dataset.theme = theme.id;
+    btn.addEventListener('click', () => setTheme(theme.id));
+    host.appendChild(btn);
+  }
+}
+
+// -------------------------------------------------------------------- screens
+
+function show(screen) {
+  state.screen = screen;
+  $('screen-title').classList.toggle('hidden', screen !== 'title');
+  $('screen-browse').classList.toggle('hidden', screen !== 'browse');
+  $('screen-wait').classList.toggle('hidden', screen !== 'wait');
+  $('hud').classList.toggle('hidden', screen !== 'game');
+  if (screen !== 'game') $('result').classList.add('hidden');
+  view.autoRotate = screen !== 'game';
+  view.setInteractive(false);
+  view.setShowcase(screen !== 'game');
+  if (screen === 'title') showcase();
+}
+
+let toastTimer = null;
+function toast(text, ms = 2600) {
+  const el = $('toast');
+  el.textContent = text;
+  el.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add('hidden'), ms);
+}
+
+// ------------------------------------------------------------------ showcase
+
+/** A decorative, unplayable board behind the menus. */
+function showcase() {
+  const demo = new Game(state.size);
+  let seed = 1337 + state.size * 17;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  for (let id = 0; id < demo.cells.length; id++) {
+    const r = rand();
+    if (r < 0.13) demo.cells[id] = P1;
+    else if (r < 0.26) demo.cells[id] = P2;
+  }
+  state.game = null;
+  view.setGame(demo);
+}
+
+// ---------------------------------------------------------------- board size
+
+function setSize(n) {
+  state.size = Math.min(MAX_SIZE, Math.max(MIN_SIZE, n));
+  $('size-value').textContent = state.size;
+  $('size-note').textContent = `${state.size}×${state.size} per face · ${6 * state.size * state.size} tiles`;
+  $('size-down').disabled = state.size <= MIN_SIZE;
+  $('size-up').disabled = state.size >= MAX_SIZE;
+  store.set('cube5.size', state.size);
+  if (state.screen === 'title') showcase();
+}
+
+// ----------------------------------------------------------------- game flow
+
+function startGame({ size, first, mode, seat, isHost }) {
+  state.mode = mode;
+  state.seat = seat;
+  state.isHost = isHost;
+  state.size = size;
+  state.rematchPending = false;
+  state.game = new Game(size, { first });
+  view.setGame(state.game);
+  $('result').classList.add('hidden');
+  show('game');
+  syncHud();
+}
+
+function syncHud() {
+  const g = state.game;
+  if (!g) return;
+
+  const leftSeat = state.mode === 'hotseat' ? P1 : state.seat;
+  $('dot-me').style.color = leftSeat === P1 ? 'var(--p1)' : 'var(--p2)';
+  $('dot-them').style.color = leftSeat === P1 ? 'var(--p2)' : 'var(--p1)';
+
+  if (state.mode === 'hotseat') {
+    $('name-me').textContent = 'Player 1';
+    $('name-them').textContent = 'Player 2';
+  } else {
+    $('name-me').textContent = state.me;
+    $('name-them').textContent = state.them;
+  }
+
+  const myTurn = state.mode === 'hotseat' || g.turn === state.seat;
+  const line = $('turn-line');
+  if (g.over) {
+    line.textContent = g.winner === -1 ? 'Draw' : 'Game over';
+    line.classList.remove('active');
+  } else {
+    line.textContent = state.mode === 'hotseat'
+      ? `${g.turn === P1 ? 'Player 1' : 'Player 2'} to move`
+      : (myTurn ? 'Your turn' : `Waiting for ${state.them}`);
+    line.classList.toggle('active', myTurn);
+  }
+
+  $('btn-resign').disabled = g.over;
+  view.setInteractive(!g.over && myTurn, (id) => g.legal(id));
+}
+
+/** Apply a move that has already been validated, from either side. */
+function commitMove(id, { remote }) {
+  const g = state.game;
+  if (!g || !g.play(id)) return false;
+  view.popCell(id);
+  view.refresh();
+  if (remote && view.cellVisibility(id) < 0.3) view.focusCell(id);
+  syncHud();
+  if (g.over) announceResult();
+  return true;
+}
+
+function playHere(id) {
+  const g = state.game;
+  if (!g || g.over) return;
+  const mover = g.turn;
+  if (state.mode === 'online' && mover !== state.seat) return;
+  const n = g.moves.length;
+  if (!commitMove(id, { remote: false })) return;
+  if (state.mode === 'online') net.send('move', { id, n });
+}
+
+function announceResult() {
+  const g = state.game;
+  const overlay = $('result');
+  const title = $('result-title');
+  const body = $('result-body');
+
+  if (g.winner === -1) {
+    title.textContent = 'Draw';
+    body.textContent = 'Every tile is claimed and nobody reached five.';
+  } else if (state.mode === 'hotseat') {
+    title.textContent = `${g.winner === P1 ? 'Player 1' : 'Player 2'} wins`;
+    body.textContent = describeLine(g);
+  } else if (g.winner === state.seat) {
+    title.textContent = 'You won';
+    body.textContent = describeLine(g);
+  } else {
+    title.textContent = 'You lost';
+    body.textContent = describeLine(g);
+  }
+
+  $('btn-rematch').textContent = 'Rematch';
+  $('btn-rematch').disabled = false;
+  overlay.classList.remove('hidden');
+  if (g.winningLine) view.focusCell(g.winningLine[Math.floor(g.winningLine.length / 2)]);
+}
+
+function describeLine(g) {
+  if (!g.winningLine) return 'The game was resigned.';
+  const faces = new Set(g.winningLine.map((id) => g.topo.decode(id).f)).size;
+  const run = g.winningLine.length;
+  return faces > 1
+    ? `${run} in a row, wrapping across ${faces} faces.`
+    : `${run} in a row on a single face.`;
+}
+
+function leaveGame() {
+  if (state.mode === 'online') {
+    net.send('bye');
+    net.leave();
+  }
+  state.mode = null;
+  state.connected = false;
+  state.game = null;
+  state.them = 'Opponent';
+  show('title');
+}
+
+// -------------------------------------------------------------- online setup
+
+function hostFirstPlayer() {
+  return Math.random() < 0.5 ? P1 : P2;
+}
+
+async function doHost() {
+  try {
+    const { lobbyId } = await net.host(state.size);
+    $('wait-lobby').textContent = lobbyId;
+    state.isHost = true;
+    show('wait');
+  } catch (err) {
+    toast(`Could not create a lobby: ${err.message}`, 4000);
+  }
+}
+
+async function doBrowse() {
+  show('browse');
+  await refreshLobbies();
+}
+
+async function refreshLobbies() {
+  const list = $('lobby-list');
+  list.innerHTML = '<p class="hint">Searching…</p>';
+  try {
+    const lobbies = await net.list();
+    if (!lobbies.length) {
+      list.innerHTML = '<p class="hint">No open Cube⁵ lobbies found.</p>';
+      return;
+    }
+    list.innerHTML = '';
+    for (const lobby of lobbies) {
+      const row = document.createElement('div');
+      row.className = 'lobby';
+      const who = document.createElement('div');
+      who.innerHTML = `<div class="who"></div><div class="meta">${lobby.size}×${lobby.size} cube</div>`;
+      who.querySelector('.who').textContent = lobby.host;
+      const join = document.createElement('button');
+      join.textContent = 'Join';
+      join.addEventListener('click', () => doJoin(lobby.id));
+      row.append(who, join);
+      list.appendChild(row);
+    }
+  } catch (err) {
+    list.innerHTML = '<p class="hint"></p>';
+    list.querySelector('.hint').textContent = `Lobby search failed: ${err.message}`;
+  }
+}
+
+async function doJoin(id) {
+  try {
+    const info = await net.join(id);
+    state.isHost = false;
+    state.them = info.host;
+    state.size = info.size;
+    toast(`Joined ${info.host}'s cube — waiting for the first move…`);
+    net.send('hello', { name: state.me });
+    show('wait');
+    $('wait-lobby').textContent = String(id);
+  } catch (err) {
+    toast(`Could not join: ${err.message}`, 4000);
+  }
+}
+
+// ---------------------------------------------------------- protocol handling
+
+net.on('event', (ev) => {
+  if (ev.type === 'peer-joined') {
+    state.connected = true;
+    net.send('hello', { name: state.me });
+    if (state.isHost) {
+      const first = hostFirstPlayer();
+      net.send('start', { size: state.size, first });
+      startGame({ size: state.size, first, mode: 'online', seat: P1, isHost: true });
+      toast('Opponent connected');
+    }
+  } else if (ev.type === 'peer-lost') {
+    state.connected = false;
+    if (state.screen === 'game' && state.game && !state.game.over) {
+      toast(`Opponent disconnected — ${ev.reason}`, 5000);
+      $('result-title').textContent = 'Opponent left';
+      $('result-body').textContent = ev.reason;
+      $('btn-rematch').disabled = true;
+      $('result').classList.remove('hidden');
+      view.setInteractive(false);
+    } else if (state.screen === 'wait') {
+      toast(ev.reason, 4000);
+    }
+  } else if (ev.type === 'invited-join') {
+    state.isHost = false;
+    net.send('hello', { name: state.me });
+    show('wait');
+    $('wait-lobby').textContent = ev.lobbyId;
+    toast('Joining game from Steam invite…');
+  } else if (ev.type === 'error') {
+    toast(ev.reason, 4000);
+  }
+});
+
+net.on('message', (msg) => {
+  if (!msg || typeof msg.t !== 'string') return;
+
+  switch (msg.t) {
+    case 'hello':
+      state.connected = true;
+      if (msg.name) state.them = msg.name;
+      syncHud();
+      break;
+
+    case 'start':
+      // Only the host issues `start`; the guest always plays second seat.
+      if (state.isHost) break;
+      startGame({ size: msg.size, first: msg.first, mode: 'online', seat: P2, isHost: false });
+      toast(msg.first === P2 ? 'You move first' : `${state.them} moves first`);
+      break;
+
+    case 'move': {
+      const g = state.game;
+      if (!g || g.over) break;
+      if (g.turn === state.seat) break;             // not their turn to move
+      if (typeof msg.n === 'number' && msg.n !== g.moves.length) {
+        toast('Move out of sequence — ignoring', 3000);
+        break;
+      }
+      if (!commitMove(msg.id, { remote: true })) toast('Opponent sent an illegal move', 3000);
+      break;
+    }
+
+    case 'resign': {
+      const g = state.game;
+      if (!g || g.over) break;
+      g.resign(state.seat === P1 ? P2 : P1);
+      view.refresh();
+      syncHud();
+      announceResult();
+      $('result-title').textContent = 'You won';
+      $('result-body').textContent = `${state.them} resigned.`;
+      break;
+    }
+
+    case 'rematch':
+      if (state.isHost) {
+        const first = state.game ? (state.game.first === P1 ? P2 : P1) : P1;
+        net.send('start', { size: state.size, first });
+        startGame({ size: state.size, first, mode: 'online', seat: P1, isHost: true });
+        toast('Rematch — colours stay, the first move swaps');
+      } else {
+        toast(`${state.them} wants a rematch`);
+      }
+      break;
+
+    case 'bye':
+      state.connected = false;
+      toast(`${state.them} left the game`, 4000);
+      if (state.screen === 'game') {
+        $('result-title').textContent = 'Opponent left';
+        $('result-body').textContent = 'They closed the game.';
+        $('btn-rematch').disabled = true;
+        $('result').classList.remove('hidden');
+      }
+      break;
+
+    default:
+      break;
+  }
+});
+
+// ------------------------------------------------------------------- wiring
+
+view.onPick((id) => playHere(id));
+
+$('btn-host').addEventListener('click', doHost);
+$('btn-browse').addEventListener('click', doBrowse);
+$('btn-local').addEventListener('click', () => {
+  startGame({ size: state.size, first: P1, mode: 'hotseat', seat: P1, isHost: true });
+});
+$('btn-quit').addEventListener('click', () => net.quit());
+
+$('size-down').addEventListener('click', () => setSize(state.size - 1));
+$('size-up').addEventListener('click', () => setSize(state.size + 1));
+
+$('btn-refresh').addEventListener('click', refreshLobbies);
+$('btn-browse-back').addEventListener('click', () => show('title'));
+$('btn-join-id').addEventListener('click', () => {
+  const id = $('lobby-id').value.trim();
+  if (id) doJoin(id);
+});
+$('lobby-id').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') $('btn-join-id').click();
+});
+
+$('btn-invite').addEventListener('click', async () => {
+  const ok = await net.invite();
+  if (!ok) toast('The Steam overlay is not available', 3500);
+});
+$('btn-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('wait-lobby').textContent);
+    toast('Lobby ID copied');
+  } catch {
+    toast('Could not reach the clipboard', 3000);
+  }
+});
+$('btn-cancel-host').addEventListener('click', () => {
+  net.leave();
+  show('title');
+});
+
+$('btn-view').addEventListener('click', () => view.resetView());
+$('btn-last').addEventListener('click', () => {
+  if (state.game && state.game.lastMove >= 0) view.focusCell(state.game.lastMove);
+});
+$('btn-resign').addEventListener('click', () => {
+  const g = state.game;
+  if (!g || g.over) return;
+  const me = state.mode === 'hotseat' ? g.turn : state.seat;
+  g.resign(me);
+  if (state.mode === 'online') net.send('resign');
+  view.refresh();
+  syncHud();
+  announceResult();
+  $('result-title').textContent = state.mode === 'hotseat'
+    ? `${g.winner === P1 ? 'Player 1' : 'Player 2'} wins`
+    : 'You resigned';
+  $('result-body').textContent = 'Resigned.';
+});
+$('btn-leave').addEventListener('click', leaveGame);
+$('btn-result-leave').addEventListener('click', leaveGame);
+
+$('btn-rematch').addEventListener('click', () => {
+  if (state.mode === 'hotseat') {
+    const first = state.game.first === P1 ? P2 : P1;
+    startGame({ size: state.size, first, mode: 'hotseat', seat: P1, isHost: true });
+    return;
+  }
+  if (state.isHost) {
+    const first = state.game.first === P1 ? P2 : P1;
+    net.send('start', { size: state.size, first });
+    startGame({ size: state.size, first, mode: 'online', seat: P1, isHost: true });
+  } else {
+    net.send('rematch');
+    $('btn-rematch').disabled = true;
+    toast('Rematch requested…');
+  }
+});
+
+$('btn-help').addEventListener('click', () => $('help').classList.remove('hidden'));
+$('btn-help-close').addEventListener('click', () => $('help').classList.add('hidden'));
+
+window.addEventListener('keydown', (ev) => {
+  if (ev.target instanceof HTMLInputElement) return;
+  if (ev.key === 'Escape') {
+    $('help').classList.add('hidden');
+  } else if (ev.key === 'r' && state.screen === 'game') {
+    view.resetView();
+  } else if (ev.key === 'l' && state.game && state.game.lastMove >= 0) {
+    view.focusCell(state.game.lastMove);
+  }
+});
+
+// -------------------------------------------------------------------- boot
+
+async function boot() {
+  buildThemeButtons();
+  setTheme(store.get('cube5.theme', DEFAULT_THEME));
+  setSize(Number(store.get('cube5.size', 5)) || 5);
+  show('title');
+
+  const status = await net.refreshStatus();
+  const line = $('steam-line');
+  if (status.ok) {
+    state.me = status.name || 'You';
+    line.textContent = `Steam: signed in as ${state.me} (App ID ${status.appId})`;
+    line.classList.remove('bad');
+  } else {
+    line.textContent = `Steam unavailable — ${status.error}. Online play is disabled; two players on one screen still works.`;
+    line.classList.add('bad');
+    $('btn-host').disabled = true;
+    $('btn-browse').disabled = true;
+  }
+}
+
+boot();

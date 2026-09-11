@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' 'sha256-q6r0770JtVIRJf9PSD4+Ii79dSCPXGYv58Yh9YMlSo0='; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>Cube⁵</title>
+  <link rel="stylesheet" href="css/ui.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "../node_modules/three/build/three.module.js",
+        "three/addons/": "../node_modules/three/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <div id="ui">
+    <!-- ---------------------------------------------------------- title --->
+    <section id="screen-title" class="screen center left">
+      <div class="panel wide">
+        <h1 class="logo">Cube<sup>5</sup></h1>
+        <p class="tagline">Five in a row — all the way around.</p>
+
+        <div class="menu">
+          <button id="btn-host" class="primary">Host a game</button>
+          <button id="btn-browse">Join a game</button>
+          <button id="btn-local">Two players, one screen</button>
+        </div>
+
+        <div class="row size-row">
+          <span class="label">Board</span>
+          <button id="size-down" class="chip">–</button>
+          <span id="size-value" class="size-value">5</span>
+          <button id="size-up" class="chip">+</button>
+          <span id="size-note" class="hint">5×5 per face · 150 tiles</span>
+        </div>
+
+        <p id="steam-line" class="steam">Checking Steam…</p>
+        <div class="row foot">
+          <button id="btn-help" class="ghost">How to play</button>
+          <button id="btn-quit" class="ghost">Quit</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- --------------------------------------------------------- browse --->
+    <section id="screen-browse" class="screen center left hidden">
+      <div class="panel wide">
+        <h2>Join a game</h2>
+        <div id="lobby-list" class="list"><p class="hint">Searching…</p></div>
+        <div class="row">
+          <input id="lobby-id" type="text" inputmode="numeric" placeholder="…or paste a lobby ID" />
+          <button id="btn-join-id">Join</button>
+        </div>
+        <p class="hint">
+          On App&nbsp;ID&nbsp;480 the public lobby list is shared with every other
+          test build, so the browser can come up empty. A pasted ID or a Steam
+          invite always works.
+        </p>
+        <div class="row foot">
+          <button id="btn-refresh" class="ghost">Refresh</button>
+          <button id="btn-browse-back" class="ghost">Back</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- -------------------------------------------------------- waiting --->
+    <section id="screen-wait" class="screen center left hidden">
+      <div class="panel">
+        <h2>Waiting for an opponent</h2>
+        <p class="hint">Send a friend this lobby ID, or invite them through Steam.</p>
+        <div class="row">
+          <code id="wait-lobby" class="code">…</code>
+          <button id="btn-copy" class="chip">Copy</button>
+        </div>
+        <div class="row foot">
+          <button id="btn-invite" class="primary">Invite via Steam</button>
+          <button id="btn-cancel-host" class="ghost">Cancel</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------ hud --->
+    <div id="hud" class="hidden">
+      <div class="hud-top">
+        <div class="seat">
+          <span class="dot" id="dot-me"></span>
+          <span id="name-me">You</span>
+        </div>
+        <div id="turn-line" class="turn">Your turn</div>
+        <div class="seat right">
+          <span id="name-them">Opponent</span>
+          <span class="dot" id="dot-them"></span>
+        </div>
+      </div>
+      <div class="hud-bottom">
+        <button id="btn-view" class="ghost">Reset view</button>
+        <button id="btn-last" class="ghost">Show last move</button>
+        <button id="btn-resign" class="ghost">Resign</button>
+        <button id="btn-leave" class="ghost">Leave</button>
+      </div>
+    </div>
+
+    <!-- --------------------------------------------------------- result --->
+    <div id="result" class="screen center hidden">
+      <div class="panel">
+        <h2 id="result-title">You won</h2>
+        <p id="result-body" class="hint"></p>
+        <div class="row foot">
+          <button id="btn-rematch" class="primary">Rematch</button>
+          <button id="btn-result-leave" class="ghost">Leave</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ----------------------------------------------------------- help --->
+    <div id="help" class="screen center hidden">
+      <div class="panel wide">
+        <h2>How to play</h2>
+        <ul class="rules">
+          <li>The board is the <b>whole surface</b> of the cube — six faces of
+              N×N tiles. Drag to spin it, scroll to zoom.</li>
+          <li>Players alternate claiming empty tiles. First to <b>five in a
+              row</b> wins.</li>
+          <li>A row does not stop at the edge of a face: it <b>rolls over onto
+              the next face</b> and keeps going straight. Straight rows circle
+              the whole cube in 4N tiles.</li>
+          <li>Diagonals wrap over edges too, but they <b>stop at the cube's
+              eight corners</b>, where only 270° of surface meet.</li>
+          <li>On a small cube there is no five-in-a-row on a single face — every
+              win has to travel around the cube.</li>
+          <li><b>Watch every angle.</b> The threat that beats you is usually on
+              the face you cannot see.</li>
+        </ul>
+        <div class="row foot">
+          <button id="btn-help-close" class="primary">Got it</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="hidden"></div>
+
+    <div id="themebar">
+      <span class="label">Theme</span>
+      <div id="theme-buttons"></div>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
